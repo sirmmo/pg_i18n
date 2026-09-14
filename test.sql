@@ -67,6 +67,29 @@ SELECT id, sku, name, description, price FROM products_i18n ORDER BY id;
 -- expression index on the immutable form
 CREATE INDEX ON products_i18n (i18n_get(name, 'it', 'en'));
 
+-- ================================================================ LIKE search on text columns (pre-migration)
+SELECT i18n_values('{"en":"Chair","it":"Sedia"}') AS vals,       -- {Chair,Sedia}
+       i18n_values('plain')                        AS plain,      -- {plain}
+       i18n_all('{"en":"Chair","it":"Sedia"}')     AS joined;     -- Chair\nSedia
+
+-- one language, with fallback
+SELECT sku FROM products_i18n WHERE i18n_get(name, 'it', 'en') ILIKE '%sedia%';   -- B
+-- any language
+SELECT sku FROM products_i18n WHERE i18n_all(name) ILIKE '%chair%' ORDER BY sku;  -- B
+SELECT sku FROM products_i18n WHERE i18n_all(name) ILIKE '%plain%' ORDER BY sku;  -- A
+-- through the view, in the session language
+SET i18n.lang = 'it';
+SELECT sku FROM products WHERE name ILIKE '%piano%';                              -- A
+RESET i18n.lang;
+
+-- trigram indexes on the text column
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX products_name_it_trgm ON products_i18n USING gin (i18n_get(name, 'it', 'en') gin_trgm_ops);
+CREATE INDEX products_name_all_trgm ON products_i18n USING gin (i18n_all(name) gin_trgm_ops);
+SET enable_seqscan = off;
+EXPLAIN (COSTS OFF) SELECT sku FROM products_i18n WHERE i18n_all(name) ILIKE '%chair%';
+RESET enable_seqscan;
+
 -- ================================================================ migration to jsonb
 DROP VIEW products;                                   -- ALTER TYPE needs no dependent view
 INSERT INTO products_i18n (sku, name, description) VALUES ('D', 'Legacy', NULL);

@@ -15,6 +15,8 @@
 --   i18n_get(v, lang, fallback)     -> text   : IMMUTABLE, usable in expression indexes
 --   i18n_set(v, lang, val)          -> text   : return v with lang set to val (NULL val removes lang)
 --   i18n_set(v, lang, val, promote) -> text   : same, plain-string v is promoted as {promote: v}
+--   i18n_values(v)                  -> text[] : every translation (for search across languages)
+--   i18n_all(v)                     -> text   : translations joined by newline, indexable with pg_trgm
 --   i18n_wrap_table(tbl, cols, view)          : create an updatable view that exposes
 --                                               translatable columns as plain strings
 --   i18n_migration_report(tbl, col)           : count null / plain / json / invalid rows
@@ -274,6 +276,36 @@ BEGIN
     PERFORM i18n_migrate_column(p_table, c, p_lang);
   END LOOP;
 END $$;
+
+-- ---------------------------------------------------------------- search helpers
+-- i18n_values(v)  : all translations as text[] (a plain string gives a 1-element array)
+-- i18n_all(v)     : all translations joined by newline, for LIKE / trigram search
+--                   across languages. IMMUTABLE, so it can be indexed with pg_trgm.
+
+CREATE OR REPLACE FUNCTION i18n_values(v jsonb) RETURNS text[]
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE
+    WHEN v IS NULL THEN NULL
+    WHEN i18n_is_json(v) THEN (SELECT COALESCE(array_agg(value ORDER BY key), '{}') FROM jsonb_each_text(v))
+    WHEN jsonb_typeof(v) = 'string' THEN ARRAY[v #>> '{}']
+    ELSE ARRAY[v::text]
+  END
+$$;
+
+CREATE OR REPLACE FUNCTION i18n_values(v text) RETURNS text[]
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE
+    WHEN v IS NULL THEN NULL
+    WHEN i18n_is_json(v) THEN i18n_values(v::jsonb)
+    ELSE ARRAY[v]
+  END
+$$;
+
+CREATE OR REPLACE FUNCTION i18n_all(v jsonb) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$ SELECT array_to_string(i18n_values(v), E'\n') $$;
+
+CREATE OR REPLACE FUNCTION i18n_all(v text) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$ SELECT array_to_string(i18n_values(v), E'\n') $$;
 
 -- ---------------------------------------------------------------- transparent view layer
 --

@@ -56,6 +56,8 @@ matching the column type, so the same queries work before and after the
 | `i18n_get(v)` | STABLE | Language is `i18n.lang`. |
 | `i18n_langs(v)` | IMMUTABLE | `text[]` of languages present. `{}` for a plain string. |
 | `i18n_is_json(v)` | IMMUTABLE | True only for a JSON object whose values are all strings, so a text column that happens to contain some other JSON is still treated as a plain string. |
+| `i18n_values(v)` | IMMUTABLE | `text[]` of every translation. A plain string gives a one-element array. |
+| `i18n_all(v)` | IMMUTABLE | Every translation joined by newline. For `LIKE` search across languages. |
 
 Use the three-argument form in expression indexes; the shorter forms depend on
 session state and cannot be indexed.
@@ -160,13 +162,50 @@ The rewrite takes an `ACCESS EXCLUSIVE` lock on the table for its duration.
 translation object, for example `{"foo": 1}`; they are promoted like plain
 strings, which is probably not what you want, so inspect them first.
 
-## Indexing and searching
+## Searching with LIKE
+
+All of this works on the original `text` columns, before any migration, on
+plain and JSON rows alike, and keeps working on `jsonb` afterwards.
 
 ```sql
--- equality / LIKE on one language, works on text and jsonb columns
-CREATE INDEX ON products_i18n (i18n_get(name, 'it', 'en'));
-SELECT * FROM products_i18n WHERE i18n_get(name, 'it', 'en') ILIKE 'sed%';
+-- one language (with fallback)
+SELECT * FROM products_i18n WHERE i18n_get(name, 'it', 'en') ILIKE '%sedia%';
 
+-- any language
+SELECT * FROM products_i18n WHERE i18n_all(name) ILIKE '%chair%';
+
+-- through the wrapped view: the session language, not indexable
+SET i18n.lang = 'it';
+SELECT * FROM products WHERE name ILIKE '%sedia%';
+```
+
+Do not `LIKE` the raw column: on JSON rows it also matches language keys,
+quotes and `\uXXXX` escapes, and a search for `Sedia` would match a row whose
+German translation contains it while missing an Italian one written with an
+escape.
+
+### Indexes
+
+`i18n_get(v, lang, fallback)` and `i18n_all(v)` are IMMUTABLE, so both can be
+indexed. For `%term%` patterns use pg_trgm:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+-- one language
+CREATE INDEX ON products_i18n USING gin (i18n_get(name, 'it', 'en') gin_trgm_ops);
+-- any language
+CREATE INDEX ON products_i18n USING gin (i18n_all(name) gin_trgm_ops);
+```
+
+Both serve `LIKE`, `ILIKE`, `~` and the `%` similarity operator. For equality
+or left-anchored `LIKE 'sed%'` a plain B-tree on the same expression is
+enough (use `text_pattern_ops` if the database collation is not `C`).
+
+These expression indexes survive the migration to jsonb: `ALTER COLUMN TYPE`
+rebuilds them against the jsonb overloads.
+
+```sql
 -- jsonb only: containment and key existence
 CREATE INDEX ON products_i18n USING gin (name);
 SELECT * FROM products_i18n WHERE name @> '{"it": "Sedia"}';
