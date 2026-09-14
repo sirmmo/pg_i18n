@@ -1,7 +1,13 @@
 -- pg_i18n: helpers for columns that hold either a plain string
 -- or a JSON object of translations: {"en":"Hello","it":"Ciao"}
 --
--- Requires PostgreSQL >= 9.5 (jsonb_set). Tested on 16.
+-- Requires PostgreSQL >= 9.5. Tested on 14, 16 and 17.
+--
+-- Functions that call other pg_i18n functions are declared with
+-- SET search_path FROM CURRENT, so they keep working when PostgreSQL 17+
+-- runs index builds and constraint checks under a restricted search_path.
+-- This pins the schema they were installed in: install with the intended
+-- schema on the search_path (or CREATE EXTENSION ... SCHEMA x).
 --
 -- Session settings (custom GUCs, no postgresql.conf change needed):
 --   SET i18n.lang = 'it';          -- language used by the 1-arg functions / views
@@ -35,7 +41,7 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION i18n_lang() RETURNS text
-LANGUAGE sql STABLE AS $$
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
   SELECT COALESCE(NULLIF(current_setting('i18n.lang', true), ''), i18n_default_lang())
 $$;
 
@@ -60,7 +66,7 @@ EXCEPTION WHEN invalid_text_representation THEN
 END $$;
 
 CREATE OR REPLACE FUNCTION i18n_langs(v text) RETURNS text[]
-LANGUAGE sql IMMUTABLE AS $$
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
   SELECT CASE WHEN i18n_is_json(v)
               THEN (SELECT COALESCE(array_agg(k ORDER BY k), '{}') FROM jsonb_object_keys(v::jsonb) k)
               ELSE '{}'::text[] END
@@ -71,7 +77,7 @@ $$;
 -- Resolution order: lang -> fallback -> first available translation.
 -- A plain string is returned as-is whatever the language.
 CREATE OR REPLACE FUNCTION i18n_get(v text, lang text, fallback text) RETURNS text
-LANGUAGE plpgsql IMMUTABLE AS $$
+LANGUAGE plpgsql IMMUTABLE SET search_path FROM CURRENT AS $$
 DECLARE j jsonb;
 BEGIN
   IF NOT i18n_is_json(v) THEN
@@ -86,12 +92,12 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION i18n_get(v text, lang text) RETURNS text
-LANGUAGE sql STABLE AS $$
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
   SELECT i18n_get(v, lang, i18n_default_lang())
 $$;
 
 CREATE OR REPLACE FUNCTION i18n_get(v text) RETURNS text
-LANGUAGE sql STABLE AS $$
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
   SELECT i18n_get(v, i18n_lang(), i18n_default_lang())
 $$;
 
@@ -102,7 +108,7 @@ $$;
 --   NULL/'' v       -> starts from {}
 --   NULL val        -> removes lang; if nothing is left, returns NULL
 CREATE OR REPLACE FUNCTION i18n_set(v text, lang text, val text, promote_as text) RETURNS text
-LANGUAGE plpgsql IMMUTABLE AS $$
+LANGUAGE plpgsql IMMUTABLE SET search_path FROM CURRENT AS $$
 DECLARE j jsonb;
 BEGIN
   IF i18n_is_json(v) THEN
@@ -126,13 +132,13 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION i18n_set(v text, lang text, val text) RETURNS text
-LANGUAGE sql STABLE AS $$
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
   SELECT i18n_set(v, lang, val, i18n_default_lang())
 $$;
 
 -- Convenience: set the session language's translation.
 CREATE OR REPLACE FUNCTION i18n_set(v text, val text) RETURNS text
-LANGUAGE sql STABLE AS $$
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
   SELECT i18n_set(v, i18n_lang(), val, i18n_default_lang())
 $$;
 
@@ -149,7 +155,7 @@ LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION i18n_langs(v jsonb) RETURNS text[]
-LANGUAGE sql IMMUTABLE AS $$
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
   SELECT CASE WHEN i18n_is_json(v)
               THEN (SELECT COALESCE(array_agg(k ORDER BY k), '{}') FROM jsonb_object_keys(v) k)
               ELSE '{}'::text[] END
@@ -167,13 +173,13 @@ LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION i18n_get(v jsonb, lang text) RETURNS text
-LANGUAGE sql STABLE AS $$ SELECT i18n_get(v, lang, i18n_default_lang()) $$;
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$ SELECT i18n_get(v, lang, i18n_default_lang()) $$;
 
 CREATE OR REPLACE FUNCTION i18n_get(v jsonb) RETURNS text
-LANGUAGE sql STABLE AS $$ SELECT i18n_get(v, i18n_lang(), i18n_default_lang()) $$;
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$ SELECT i18n_get(v, i18n_lang(), i18n_default_lang()) $$;
 
 CREATE OR REPLACE FUNCTION i18n_set(v jsonb, lang text, val text, promote_as text) RETURNS jsonb
-LANGUAGE plpgsql IMMUTABLE AS $$
+LANGUAGE plpgsql IMMUTABLE SET search_path FROM CURRENT AS $$
 DECLARE j jsonb;
 BEGIN
   IF i18n_is_json(v) THEN
@@ -199,10 +205,10 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION i18n_set(v jsonb, lang text, val text) RETURNS jsonb
-LANGUAGE sql STABLE AS $$ SELECT i18n_set(v, lang, val, i18n_default_lang()) $$;
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$ SELECT i18n_set(v, lang, val, i18n_default_lang()) $$;
 
 CREATE OR REPLACE FUNCTION i18n_set(v jsonb, val text) RETURNS jsonb
-LANGUAGE sql STABLE AS $$ SELECT i18n_set(v, i18n_lang(), val, i18n_default_lang()) $$;
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$ SELECT i18n_set(v, i18n_lang(), val, i18n_default_lang()) $$;
 
 -- ---------------------------------------------------------------- migration text -> jsonb
 --
@@ -212,7 +218,7 @@ LANGUAGE sql STABLE AS $$ SELECT i18n_set(v, i18n_lang(), val, i18n_default_lang
 
 CREATE OR REPLACE FUNCTION i18n_migration_report(p_table regclass, p_col name)
 RETURNS TABLE (col_type text, total bigint, nulls bigint, plain bigint, translated bigint, other_json bigint)
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
   SELECT format_type(a.atttypid, a.atttypmod) INTO col_type
   FROM pg_attribute a WHERE a.attrelid = p_table AND a.attname = p_col AND NOT a.attisdropped;
@@ -229,7 +235,7 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION i18n_migrate_column(p_table regclass, p_col name, p_lang text DEFAULT NULL)
-RETURNS void LANGUAGE plpgsql AS $$
+RETURNS void LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 DECLARE
   lang    text := COALESCE(p_lang, i18n_default_lang());
   typ     text;
@@ -269,7 +275,7 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION i18n_migrate_table(p_table regclass, p_cols text[], p_lang text DEFAULT NULL)
-RETURNS void LANGUAGE plpgsql AS $$
+RETURNS void LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 DECLARE c text;
 BEGIN
   FOREACH c IN ARRAY p_cols LOOP
@@ -283,7 +289,7 @@ END $$;
 --                   across languages. IMMUTABLE, so it can be indexed with pg_trgm.
 
 CREATE OR REPLACE FUNCTION i18n_values(v jsonb) RETURNS text[]
-LANGUAGE sql IMMUTABLE AS $$
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
   SELECT CASE
     WHEN v IS NULL THEN NULL
     WHEN i18n_is_json(v) THEN (SELECT COALESCE(array_agg(value ORDER BY key), '{}') FROM jsonb_each_text(v))
@@ -293,7 +299,7 @@ LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION i18n_values(v text) RETURNS text[]
-LANGUAGE sql IMMUTABLE AS $$
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
   SELECT CASE
     WHEN v IS NULL THEN NULL
     WHEN i18n_is_json(v) THEN i18n_values(v::jsonb)
@@ -302,10 +308,10 @@ LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION i18n_all(v jsonb) RETURNS text
-LANGUAGE sql IMMUTABLE AS $$ SELECT array_to_string(i18n_values(v), E'\n') $$;
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$ SELECT array_to_string(i18n_values(v), E'\n') $$;
 
 CREATE OR REPLACE FUNCTION i18n_all(v text) RETURNS text
-LANGUAGE sql IMMUTABLE AS $$ SELECT array_to_string(i18n_values(v), E'\n') $$;
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$ SELECT array_to_string(i18n_values(v), E'\n') $$;
 
 -- ---------------------------------------------------------------- transparent view layer
 --
@@ -318,7 +324,7 @@ LANGUAGE sql IMMUTABLE AS $$ SELECT array_to_string(i18n_values(v), E'\n') $$;
 -- Reads return the translation, writes update only that language in the JSON.
 
 CREATE OR REPLACE FUNCTION i18n_view_trigger() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 DECLARE
   base     text   := TG_ARGV[0];            -- already-quoted base table name
   tcols    text[] := TG_ARGV[1]::text[];    -- translatable columns
@@ -399,7 +405,7 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION i18n_wrap_table(p_table regclass, p_cols text[], p_view text)
-RETURNS void LANGUAGE plpgsql AS $$
+RETURNS void LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 DECLARE
   pkcols  text[];
   sel     text;

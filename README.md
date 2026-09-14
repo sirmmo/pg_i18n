@@ -18,16 +18,50 @@ column, an updatable view layer so an application that only knows about plain
 strings keeps working, and a migration that turns the whole thing into proper
 `jsonb`.
 
-No extension, no superuser, no dependencies. Tested on PostgreSQL 16, needs 9.5+.
+Pure SQL and PL/pgSQL, no compiled code, no superuser needed. Installable as an
+extension or as a plain script. Tested on PostgreSQL 14, 16 and 17; needs 9.5+.
 
 ## Install
+
+### As an extension
+
+```sh
+make install                # uses pg_config from PATH, or PG_CONFIG=/path/to/pg_config make install
+psql -d mydb -c 'CREATE EXTENSION pg_i18n'
+```
+
+`make install` only copies two files (`pg_i18n.control` and the generated
+`pg_i18n--1.0.sql`) into `$(pg_config --sharedir)/extension/`, so on a host
+without `make` you can copy them by hand. No superuser is required to run
+`CREATE EXTENSION`, only `CREATE` privilege on the database.
+
+To put the functions in their own schema:
+
+```sql
+CREATE EXTENSION pg_i18n SCHEMA i18n;
+```
+
+The extension is not relocatable: the functions pin the schema they were
+installed in (see [search_path](#search_path)), so drop and recreate it rather
+than `ALTER EXTENSION ... SET SCHEMA`.
+
+### As a plain script
 
 ```sh
 psql -d mydb -f i18n.sql
 ```
 
-Everything is created in the current schema. Re-running the file is safe
-(`CREATE OR REPLACE` throughout).
+Everything is created in the first schema of the current `search_path`.
+Re-running the file is safe (`CREATE OR REPLACE` throughout).
+
+### search_path
+
+Functions that call other pg_i18n functions are declared
+`SET search_path FROM CURRENT`, so they keep working when PostgreSQL 17+
+builds indexes and checks constraints under a restricted `search_path`, and
+when the extension lives in a schema that callers do not have on their path.
+This means the schema is fixed at install time: install with the intended
+schema first on the `search_path`, or use `CREATE EXTENSION ... SCHEMA`.
 
 ## Quick start
 
@@ -234,11 +268,14 @@ matters.
 ## Running the tests
 
 ```sh
-./test.sh            # starts a throwaway postgres:16-alpine container, runs test.sql
+./test.sh                          # plain script, throwaway postgres:16-alpine container
+EXT=1 ./test.sh                    # build + install the extension with PGXS, then CREATE EXTENSION
+EXT=1 ./test.sh postgres:17-alpine # any official image
 ```
 
-Or against any empty database: `psql -d empty_db -f test.sql`. The script
-stops at the first failing statement.
+Or against any empty database: `psql -d empty_db -f test.sql` (add
+`-v use_ext=1` to load via `CREATE EXTENSION`). The script stops at the first
+failing statement.
 
 ## License
 

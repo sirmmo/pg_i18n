@@ -18,17 +18,52 @@ colonna di questo tipo, uno strato di viste aggiornabili che permette a
 un'applicazione che conosce solo stringhe semplici di continuare a funzionare,
 e una migrazione che trasforma il tutto in vero `jsonb`.
 
-Nessuna estensione, nessun superuser, nessuna dipendenza. Testato su
-PostgreSQL 16, richiede la 9.5 o successiva.
+Puro SQL e PL/pgSQL, nessun codice compilato, nessun superuser necessario.
+Installabile come estensione o come semplice script. Testato su PostgreSQL 14,
+16 e 17; richiede la 9.5 o successiva.
 
 ## Installazione
+
+### Come estensione
+
+```sh
+make install                # usa pg_config dal PATH, oppure PG_CONFIG=/percorso/pg_config make install
+psql -d mydb -c 'CREATE EXTENSION pg_i18n'
+```
+
+`make install` copia solo due file (`pg_i18n.control` e il generato
+`pg_i18n--1.0.sql`) in `$(pg_config --sharedir)/extension/`, quindi su un
+host senza `make` potete copiarli a mano. `CREATE EXTENSION` non richiede
+superuser, solo il privilegio `CREATE` sul database.
+
+Per mettere le funzioni in uno schema dedicato:
+
+```sql
+CREATE EXTENSION pg_i18n SCHEMA i18n;
+```
+
+L'estensione non è rilocabile: le funzioni fissano lo schema in cui sono
+state installate (vedi [search_path](#search_path)), quindi per spostarla
+eliminatela e ricreatela invece di usare `ALTER EXTENSION ... SET SCHEMA`.
+
+### Come semplice script
 
 ```sh
 psql -d mydb -f i18n.sql
 ```
 
-Tutto viene creato nello schema corrente. Rieseguire il file è sicuro
-(`CREATE OR REPLACE` ovunque).
+Tutto viene creato nel primo schema del `search_path` corrente. Rieseguire
+il file è sicuro (`CREATE OR REPLACE` ovunque).
+
+### search_path
+
+Le funzioni che chiamano altre funzioni di pg_i18n sono dichiarate
+`SET search_path FROM CURRENT`, così continuano a funzionare quando
+PostgreSQL 17+ costruisce indici e verifica vincoli con un `search_path`
+ristretto, e quando l'estensione vive in uno schema che i chiamanti non
+hanno nel proprio path. Lo schema è quindi fissato al momento
+dell'installazione: installate con lo schema desiderato per primo nel
+`search_path`, oppure usate `CREATE EXTENSION ... SCHEMA`.
 
 ## Per iniziare
 
@@ -239,11 +274,14 @@ forma esplicita.
 ## Eseguire i test
 
 ```sh
-./test.sh            # avvia un container postgres:16-alpine usa e getta ed esegue test.sql
+./test.sh                          # script semplice, container postgres:16-alpine usa e getta
+EXT=1 ./test.sh                    # compila e installa l'estensione con PGXS, poi CREATE EXTENSION
+EXT=1 ./test.sh postgres:17-alpine # qualsiasi immagine ufficiale
 ```
 
-Oppure su qualsiasi database vuoto: `psql -d db_vuoto -f test.sql`. Lo script
-si ferma alla prima istruzione che fallisce.
+Oppure su qualsiasi database vuoto: `psql -d db_vuoto -f test.sql`
+(aggiungete `-v use_ext=1` per caricare via `CREATE EXTENSION`). Lo script si
+ferma alla prima istruzione che fallisce.
 
 ## Licenza
 

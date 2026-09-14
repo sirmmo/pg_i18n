@@ -1,5 +1,9 @@
 \set ON_ERROR_STOP on
+\if :{?use_ext}
+CREATE EXTENSION pg_i18n;
+\else
 \i i18n.sql
+\endif
 
 -- scalar functions
 SELECT i18n_is_json('plain')                         AS f1,   -- f

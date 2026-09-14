@@ -1,0 +1,4 @@
+comment = 'Translatable text/jsonb columns: read and write one language, view layer for string-only apps, migration to jsonb'
+default_version = '1.0'
+relocatable = false
+superuser = false
