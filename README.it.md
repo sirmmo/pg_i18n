@@ -24,6 +24,18 @@ Puro SQL e PL/pgSQL, nessun codice compilato, nessun superuser necessario.
 Installabile come estensione o come semplice script. Testato su PostgreSQL 14,
 16 e 17; richiede la 9.5 o successiva.
 
+**Indice:** [Installazione](#installazione) · [Per iniziare](#per-iniziare) · [Riferimento delle funzioni](#riferimento-delle-funzioni) · [App basate su stringhe](#lasciare-intatta-unapplicazione-basata-su-stringhe) · [Migrare a jsonb](#migrare-a-jsonb) · [Automazione](#automazione-riempire-le-lingue-mancanti) · [Ricerca](#ricerca-con-like) · [Dettagli di comportamento](#dettagli-di-comportamento) · [Test](#eseguire-i-test)
+
+## Struttura del repository
+
+| File | Scopo |
+|---|---|
+| `i18n.sql` | nucleo: funzioni di lettura/scrittura, strato di viste, migrazione |
+| `i18n_auto.sql` | automazione: configurazione, coda, trigger, funzioni lato worker |
+| `pg_i18n.control`, `Makefile` | pacchettizzazione come estensione; `make install` genera `pg_i18n--1.0.sql` dai due file sopra |
+| `worker/pg_i18n_worker.py` | worker di traduzione (DeepL, OpenRouter, echo) con `Dockerfile` e `requirements.txt` |
+| `test.sql`, `test.sh`, `worker/test_worker.sh` | suite di test e script per eseguirla |
+
 ## Installazione
 
 ### Come estensione
@@ -34,8 +46,9 @@ psql -d mydb -c 'CREATE EXTENSION pg_i18n'
 ```
 
 `make install` copia solo due file (`pg_i18n.control` e il generato
-`pg_i18n--1.0.sql`) in `$(pg_config --sharedir)/extension/`, quindi su un
-host senza `make` potete copiarli a mano. `CREATE EXTENSION` non richiede
+`pg_i18n--1.0.sql`, cioè `i18n.sql` più `i18n_auto.sql`) in
+`$(pg_config --sharedir)/extension/`, quindi su un host senza `make` potete
+copiarli a mano. `CREATE EXTENSION` non richiede
 superuser, solo il privilegio `CREATE` sul database.
 
 Per mettere le funzioni in uno schema dedicato:
@@ -118,6 +131,41 @@ SELECT i18n_set('Chair', 'it', 'Sedia', 'en');           -- {"en": "Chair", "it"
 SELECT i18n_set('{"en":"Chair"}', 'en', 'Armchair', 'en'); -- {"en": "Armchair"}
 SELECT i18n_set('{"en":"Chair","it":"Sedia"}', 'it', NULL, 'en'); -- {"en": "Chair"}
 ```
+
+### Funzioni di sessione
+
+| Funzione | Volatilità | Descrizione |
+|---|---|---|
+| `i18n_lang()` | STABLE | Lingua corrente: `i18n.lang`, altrimenti `i18n.default_lang`. |
+| `i18n_default_lang()` | STABLE | `i18n.default_lang`, altrimenti `en`. |
+
+### Schema e migrazione
+
+| Funzione | Descrizione |
+|---|---|
+| `i18n_wrap_table(tabella, colonne, vista)` | Crea `vista` che espone `colonne` come stringhe semplici nella lingua di sessione, con trigger `INSTEAD OF` che riscrivono. Vedi [sotto](#lasciare-intatta-unapplicazione-basata-su-stringhe). |
+| `i18n_migration_report(tabella, col)` | Conta le righe null, semplici, tradotte e con altro JSON in una colonna. |
+| `i18n_migrate_column(tabella, col [, lang])` | Promuove le stringhe semplici a `{lang: v}`, converte la colonna in `jsonb`, aggiunge un vincolo CHECK. |
+| `i18n_migrate_table(tabella, colonne [, lang])` | Lo stesso per più colonne. |
+
+### Automazione
+
+| Funzione | Descrizione |
+|---|---|
+| `i18n_missing(v, langs [, default_lang])` | `text[]` delle lingue di `langs` assenti o vuote in `v`. IMMUTABLE con il terzo argomento. |
+| `i18n_exact(v, lang, default_lang)` | Traduzione esattamente per `lang`, senza ripiego. Una stringa semplice conta come `default_lang`. IMMUTABLE. |
+| `i18n_fill(v, traduzioni)` | Restituisce `v` con le lingue dell'oggetto `{"lang": "testo"}` aggiunte, solo dove ancora mancanti. STABLE. |
+| `i18n_auto_enable(tabella, col, langs [, source_lang, provider, hint])` | Configura `col` perché resti compilata per `langs` e collega il trigger. |
+| `i18n_auto_disable(tabella, col)` | Rimuove il trigger e disabilita la configurazione. |
+| `i18n_backfill(tabella, col)` | Mette in coda ogni riga esistente a cui manca una lingua configurata. Restituisce il conteggio. |
+| `i18n_queue_claim(n, worker)` | Lato worker: prende fino a `n` job in attesa (`SKIP LOCKED`) e li restituisce. |
+| `i18n_queue_complete(id, traduzioni)` | Lato worker: applica le traduzioni tramite `i18n_fill` e marca il job come completato. |
+| `i18n_queue_fail(id, errore [, max_attempts])` | Lato worker: torna in attesa, oppure `error` dopo `max_attempts`. |
+| `i18n_queue_requeue_stale([intervallo])` | Riporta in attesa i job bloccati in `processing` da più di `intervallo`. |
+
+Tabelle: `i18n_auto` (configurazione, una riga per tabella e colonna) e
+`i18n_queue` (job). Entrambe vengono incluse da `pg_dump` quando installate
+come estensione.
 
 ### Impostazioni di sessione
 
@@ -363,10 +411,20 @@ forma esplicita.
   fianco a fianco, ma nulla risolve nemmeno tra i due.
 - `i18n_set` con un valore `NULL` che svuota l'oggetto restituisce `NULL`,
   non `{}`.
+- L'automazione aggiunge soltanto lingue. Richiede solo ciò che manca o è
+  vuoto, `i18n_fill` scrive solo ciò che manca ancora al momento della
+  scrittura, e un testo sorgente modificato non ritraduce le lingue già
+  esistenti. Svuotate una lingua (`i18n_set(v, 'it', NULL)`) per farla
+  rifare.
+- I trigger dell'automazione scattano sulla tabella base, quindi le scritture
+  attraverso le viste generate e quelle dirette sono trattate allo stesso
+  modo. Anche la scrittura del worker fa scattare il trigger, che non trova
+  nulla di mancante e si ferma lì.
 
 ## Eseguire i test
 
 ```sh
+make test                          # equivale a ./test.sh; esistono anche make test-ext e make test-worker
 ./test.sh                          # script semplice, container postgres:16-alpine usa e getta
 EXT=1 ./test.sh                    # compila e installa l'estensione con PGXS, poi CREATE EXTENSION
 EXT=1 ./test.sh postgres:17-alpine # qualsiasi immagine ufficiale

@@ -22,6 +22,18 @@ DeepL or any model on OpenRouter.
 Pure SQL and PL/pgSQL, no compiled code, no superuser needed. Installable as an
 extension or as a plain script. Tested on PostgreSQL 14, 16 and 17; needs 9.5+.
 
+**Contents:** [Install](#install) · [Quick start](#quick-start) · [Function reference](#function-reference) · [String-based apps](#keeping-a-string-based-application-untouched) · [Migrating to jsonb](#migrating-to-jsonb) · [Automation](#automation-filling-missing-languages) · [Searching](#searching-with-like) · [Behaviour details](#behaviour-details) · [Tests](#running-the-tests)
+
+## Repository layout
+
+| File | Purpose |
+|---|---|
+| `i18n.sql` | core: read/write functions, view layer, migration |
+| `i18n_auto.sql` | automation: config, queue, triggers, worker-side functions |
+| `pg_i18n.control`, `Makefile` | extension packaging; `make install` builds `pg_i18n--1.0.sql` from the two files above |
+| `worker/pg_i18n_worker.py` | translation worker (DeepL, OpenRouter, echo) with `Dockerfile` and `requirements.txt` |
+| `test.sql`, `test.sh`, `worker/test_worker.sh` | test suite and runners |
+
 ## Install
 
 ### As an extension
@@ -32,8 +44,9 @@ psql -d mydb -c 'CREATE EXTENSION pg_i18n'
 ```
 
 `make install` only copies two files (`pg_i18n.control` and the generated
-`pg_i18n--1.0.sql`) into `$(pg_config --sharedir)/extension/`, so on a host
-without `make` you can copy them by hand. No superuser is required to run
+`pg_i18n--1.0.sql`, which is `i18n.sql` plus `i18n_auto.sql`) into
+`$(pg_config --sharedir)/extension/`, so on a host without `make` you can
+copy them by hand. No superuser is required to run
 `CREATE EXTENSION`, only `CREATE` privilege on the database.
 
 To put the functions in their own schema:
@@ -115,6 +128,41 @@ SELECT i18n_set('Chair', 'it', 'Sedia', 'en');           -- {"en": "Chair", "it"
 SELECT i18n_set('{"en":"Chair"}', 'en', 'Armchair', 'en'); -- {"en": "Armchair"}
 SELECT i18n_set('{"en":"Chair","it":"Sedia"}', 'it', NULL, 'en'); -- {"en": "Chair"}
 ```
+
+### Session helpers
+
+| Function | Volatility | Description |
+|---|---|---|
+| `i18n_lang()` | STABLE | Current language: `i18n.lang`, else `i18n.default_lang`. |
+| `i18n_default_lang()` | STABLE | `i18n.default_lang`, else `en`. |
+
+### Schema and migration
+
+| Function | Description |
+|---|---|
+| `i18n_wrap_table(table, cols, view)` | Create `view` exposing `cols` as plain strings in the session language, with `INSTEAD OF` triggers writing back. See [below](#keeping-a-string-based-application-untouched). |
+| `i18n_migration_report(table, col)` | Count null, plain, translated and other-JSON rows in a column. |
+| `i18n_migrate_column(table, col [, lang])` | Promote plain strings to `{lang: v}`, alter the column to `jsonb`, add a CHECK constraint. |
+| `i18n_migrate_table(table, cols [, lang])` | Same for several columns. |
+
+### Automation
+
+| Function | Description |
+|---|---|
+| `i18n_missing(v, langs [, default_lang])` | `text[]` of the languages in `langs` that are absent or empty in `v`. IMMUTABLE with the third argument. |
+| `i18n_exact(v, lang, default_lang)` | Translation for exactly `lang`, no fallback. A plain string counts as `default_lang`. IMMUTABLE. |
+| `i18n_fill(v, translations)` | Return `v` with the languages from the `{"lang": "text"}` object added, only where still missing. STABLE. |
+| `i18n_auto_enable(table, col, langs [, source_lang, provider, hint])` | Configure `col` to be kept filled for `langs` and attach the trigger. |
+| `i18n_auto_disable(table, col)` | Drop the trigger and mark the configuration disabled. |
+| `i18n_backfill(table, col)` | Queue every existing row that misses a configured language. Returns the count. |
+| `i18n_queue_claim(n, worker)` | Worker side: take up to `n` pending jobs (`SKIP LOCKED`), returns them. |
+| `i18n_queue_complete(id, translations)` | Worker side: apply translations through `i18n_fill` and mark the job done. |
+| `i18n_queue_fail(id, error [, max_attempts])` | Worker side: back to pending, or `error` after `max_attempts`. |
+| `i18n_queue_requeue_stale([interval])` | Return jobs stuck in `processing` for longer than `interval` to pending. |
+
+Tables: `i18n_auto` (configuration, one row per table and column) and
+`i18n_queue` (jobs). Both are dumped by `pg_dump` when installed as an
+extension.
 
 ### Session settings
 
@@ -356,10 +404,18 @@ matters.
   `en` side by side, but nothing resolves between them either.
 - `i18n_set` with a `NULL` value that empties the object returns `NULL`, not
   `{}`.
+- Automation only ever adds languages. It requests only what is missing or
+  empty, `i18n_fill` writes only what is still missing at write-back time, and
+  a changed source text does not retranslate languages that already exist.
+  Clear a language (`i18n_set(v, 'it', NULL)`) to have it redone.
+- Automation triggers fire on the base table, so writes through wrapped views
+  and direct writes are treated the same. The worker's own write-back fires
+  the trigger too, which finds nothing missing and stops there.
 
 ## Running the tests
 
 ```sh
+make test                          # same as ./test.sh; also make test-ext, make test-worker
 ./test.sh                          # plain script, throwaway postgres:16-alpine container
 EXT=1 ./test.sh                    # build + install the extension with PGXS, then CREATE EXTENSION
 EXT=1 ./test.sh postgres:17-alpine # any official image
