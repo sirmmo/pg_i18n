@@ -1,5 +1,7 @@
 # pg_i18n
 
+*English · [Italiano](README.it.md)*
+
 Translatable text columns for PostgreSQL, in plain SQL and PL/pgSQL.
 
 A column holds either a plain string or a JSON object of translations:
