@@ -200,3 +200,16 @@ SET i18n.lang = 'it';
 INSERT INTO products (sku, name) VALUES ('F', 'Scaffale');
 RESET i18n.lang;
 SELECT source_lang, source_text, target_langs FROM i18n_queue WHERE tbl = 'products_i18n'::regclass; -- it, Scaffale, {de,en}
+
+-- ================================================================ coverage views
+SELECT i18n_present('Chair', 'en') AS p1,                                  -- {en}
+       i18n_present('{"en":"Chair","it":""}', 'en') AS p2,                 -- {en}
+       i18n_present(''::text, 'en') AS p3,                                 -- {}
+       i18n_present('{"en":"Chair","de":"Stuhl"}'::jsonb, 'en') AS p4;     -- {de,en}
+
+SELECT * FROM i18n_missing_rows('articles', 'title', '{en,it,de}') ORDER BY pk;
+-- expected: id 3 (only it -> missing {de,en}), id 4 ('No queue', plain -> present {en}, missing {de,it})
+SELECT * FROM i18n_coverage_of('articles', 'title', '{en,it,de}');
+
+SELECT tbl, col, enabled, pk, present, missing, queued FROM i18n_missing_translations ORDER BY tbl::text, col, pk;
+SELECT tbl, col, enabled, lang, total, missing, done_pct FROM i18n_coverage ORDER BY tbl::text, col, lang;

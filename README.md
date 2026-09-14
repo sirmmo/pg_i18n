@@ -159,6 +159,11 @@ SELECT i18n_set('{"en":"Chair","it":"Sedia"}', 'it', NULL, 'en'); -- {"en": "Cha
 | `i18n_queue_complete(id, translations)` | Worker side: apply translations through `i18n_fill` and mark the job done. |
 | `i18n_queue_fail(id, error [, max_attempts])` | Worker side: back to pending, or `error` after `max_attempts`. |
 | `i18n_queue_requeue_stale([interval])` | Return jobs stuck in `processing` for longer than `interval` to pending. |
+| `i18n_present(v, default_lang)` | `text[]` of the languages that have non-empty text. A plain string counts as `default_lang`. IMMUTABLE. |
+| `i18n_missing_rows(table, col, langs)` | Rows of `col` missing any of `langs`, as `(pk, present, missing)`. Any table with a primary key. |
+| `i18n_coverage_of(table, col, langs)` | Per language: rows total, rows missing it, percentage done. |
+| view `i18n_missing_translations` | Every row and column configured in `i18n_auto` that still misses a language, with a `queued` flag. |
+| view `i18n_coverage` | Per configured column and language: `total`, `missing`, `done_pct`. |
 
 Tables: `i18n_auto` (configuration, one row per table and column) and
 `i18n_queue` (jobs). Both are dumped by `pg_dump` when installed as an
@@ -298,6 +303,38 @@ Helper functions usable on their own: `i18n_missing(v, langs)` returns which
 of `langs` are absent or empty, `i18n_fill(v, '{"it": "..."}')` adds only
 the languages still missing, `i18n_exact(v, lang, default)` reads one language
 without fallback.
+
+### Checking what is missing
+
+Two views answer "what is still untranslated" for every column configured
+with `i18n_auto_enable`, enabled or not:
+
+```sql
+SELECT * FROM i18n_coverage;
+--      tbl       | col  | enabled | lang | total | missing | done_pct
+--  products_i18n | name | t       | de   |     5 |       5 |      0.0
+--  products_i18n | name | t       | en   |     5 |       2 |     60.0
+--  products_i18n | name | t       | it   |     5 |       0 |    100.0
+
+SELECT * FROM i18n_missing_translations WHERE NOT queued;
+--      tbl       | col  | enabled |    pk     | present | missing | queued
+--  products_i18n | name | t       | {"id": 6} | {it}    | {de,en} | f
+```
+
+`queued` tells whether a translation job is already open for that row.
+Rows with no text at all show every language as missing; the automation
+skips them since there is nothing to translate from.
+
+For a column that is not configured, or to restrict the scan to one table,
+call the underlying functions directly:
+
+```sql
+SELECT * FROM i18n_missing_rows('products_i18n', 'description', '{en,it,de}');
+SELECT * FROM i18n_coverage_of('products_i18n', 'description', '{en,it,de}');
+```
+
+Both views run a scan per configured column on every query; a `WHERE tbl =`
+filter on the view does not shrink the scan, the function form does.
 
 ### Worker
 

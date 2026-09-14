@@ -19,6 +19,11 @@
 --   i18n_queue_complete(id, translations)                          (worker side)
 --   i18n_queue_fail(id, error [, max_attempts])                    (worker side)
 --   i18n_queue_requeue_stale([interval])      -> bigint
+--   i18n_present(v, default_lang)             -> text[] : languages with non-empty text
+--   i18n_missing_rows(tbl, col, langs)        -> rows of (pk, present, missing) for one column
+--   i18n_coverage_of(tbl, col, langs)         -> rows of (lang, total, missing, done_pct)
+--   VIEW i18n_missing_translations            : every configured row/column with missing languages
+--   VIEW i18n_coverage                        : per configured column and language, how many rows are missing
 
 -- ---------------------------------------------------------------- tables
 
@@ -322,3 +327,80 @@ BEGIN
   GET DIAGNOSTICS n = ROW_COUNT;
   RETURN n;
 END $$;
+
+-- ---------------------------------------------------------------- checking coverage
+
+-- Languages that have non-empty text. A plain string counts as default_lang.
+CREATE OR REPLACE FUNCTION i18n_present(v jsonb, default_lang text) RETURNS text[]
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
+  SELECT CASE
+    WHEN v IS NULL THEN '{}'::text[]
+    WHEN i18n_is_json(v) THEN
+      (SELECT COALESCE(array_agg(key ORDER BY key), '{}') FROM jsonb_each_text(v) WHERE value <> '')
+    WHEN COALESCE(i18n_get(v, default_lang, default_lang), '') = '' THEN '{}'::text[]
+    ELSE ARRAY[default_lang]
+  END
+$$;
+
+CREATE OR REPLACE FUNCTION i18n_present(v text, default_lang text) RETURNS text[]
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
+  SELECT CASE
+    WHEN v IS NULL OR v = '' THEN '{}'::text[]
+    WHEN i18n_is_json(v) THEN i18n_present(v::jsonb, default_lang)
+    ELSE ARRAY[default_lang]
+  END
+$$;
+
+-- Rows of one column that miss at least one of langs. Works on any table with
+-- a primary key, configured for automation or not.
+CREATE OR REPLACE FUNCTION i18n_missing_rows(p_table regclass, p_col name, p_langs text[],
+                                             p_default_lang text DEFAULT NULL)
+RETURNS TABLE (pk jsonb, present text[], missing text[])
+LANGUAGE plpgsql STABLE SET search_path FROM CURRENT AS $$
+DECLARE
+  pkcols text[] := i18n_pk_columns(p_table);
+  dflt   text   := COALESCE(p_default_lang, i18n_default_lang());
+BEGIN
+  IF pkcols IS NULL THEN
+    RAISE EXCEPTION 'i18n_missing_rows: % has no primary key', p_table;
+  END IF;
+  RETURN QUERY EXECUTE format(
+    'SELECT (SELECT jsonb_object_agg(k, to_jsonb(t) -> k) FROM unnest(%1$L::text[]) k),
+            i18n_present(%2$I, %4$L),
+            i18n_missing(%2$I, %3$L::text[], %4$L)
+       FROM %5$s t
+      WHERE i18n_missing(%2$I, %3$L::text[], %4$L) <> ''{}''',
+    pkcols::text, p_col, p_langs::text, dflt, p_table);
+END $$;
+
+-- Per-language counts for one column.
+CREATE OR REPLACE FUNCTION i18n_coverage_of(p_table regclass, p_col name, p_langs text[],
+                                            p_default_lang text DEFAULT NULL)
+RETURNS TABLE (lang text, total bigint, missing bigint, done_pct numeric)
+LANGUAGE plpgsql STABLE SET search_path FROM CURRENT AS $$
+DECLARE dflt text := COALESCE(p_default_lang, i18n_default_lang());
+BEGIN
+  RETURN QUERY EXECUTE format(
+    'SELECT l, count(*), count(*) FILTER (WHERE l = ANY (i18n_missing(%1$I, %2$L::text[], %3$L))),
+            round(100.0 * count(*) FILTER (WHERE NOT l = ANY (i18n_missing(%1$I, %2$L::text[], %3$L)))
+                  / GREATEST(count(*), 1), 1)
+       FROM %4$s t CROSS JOIN unnest(%2$L::text[]) l
+      GROUP BY l ORDER BY l',
+    p_col, p_langs::text, dflt, p_table);
+END $$;
+
+-- Every row/column configured in i18n_auto that still misses a language,
+-- and whether a translation job is already open for it.
+CREATE OR REPLACE VIEW i18n_missing_translations AS
+SELECT a.tbl, a.col, a.enabled, r.pk, r.present, r.missing,
+       EXISTS (SELECT 1 FROM i18n_queue q
+                WHERE q.tbl = a.tbl AND q.col = a.col AND q.pk = r.pk
+                  AND q.status IN ('pending', 'processing')) AS queued
+FROM i18n_auto a
+CROSS JOIN LATERAL i18n_missing_rows(a.tbl, a.col, a.langs) r;
+
+-- Per configured column and language: rows total, rows missing it, percentage done.
+CREATE OR REPLACE VIEW i18n_coverage AS
+SELECT a.tbl, a.col, a.enabled, c.lang, c.total, c.missing, c.done_pct
+FROM i18n_auto a
+CROSS JOIN LATERAL i18n_coverage_of(a.tbl, a.col, a.langs) c;
