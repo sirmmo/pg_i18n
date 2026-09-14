@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS i18n_auto (
   col         name     NOT NULL,
   langs       text[]   NOT NULL,       -- languages to keep filled
   source_lang text,                    -- preferred source; NULL = i18n.default_lang, else first available
-  provider    text,                    -- NULL = worker default (deepl | openrouter | echo)
+  provider    text,                    -- NULL = worker default (deepl | google | openrouter | echo)
   hint        text,                    -- free-text context handed to LLM providers
   enabled     boolean  NOT NULL DEFAULT true,
   PRIMARY KEY (tbl, col)

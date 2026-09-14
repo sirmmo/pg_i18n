@@ -10,6 +10,7 @@ docker run -d --rm --name "$PG" --network "$NET" -e POSTGRES_HOST_AUTH_METHOD=tr
   -v "$ROOT:/pg_i18n:ro" postgres:16-alpine >/dev/null
 trap 'docker rm -f "$PG" >/dev/null 2>&1; docker network rm "$NET" >/dev/null 2>&1' EXIT
 docker build -q -t "$IMG" "$HERE" >/dev/null
+docker run --rm --entrypoint python -v "$HERE:/t:ro" "$IMG" /t/test_providers.py
 
 until docker exec "$PG" pg_isready -U postgres -q; do sleep 1; done
 docker exec -w /pg_i18n "$PG" psql -U postgres -v ON_ERROR_STOP=1 -q -f i18n.sql -f i18n_auto.sql

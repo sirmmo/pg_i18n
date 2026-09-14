@@ -17,7 +17,7 @@ pg_i18n gives you functions to read and write one language out of such a
 column, an updatable view layer so an application that only knows about plain
 strings keeps working, a migration that turns the whole thing into proper
 `jsonb`, and an optional automation that fills missing languages through
-DeepL or any model on OpenRouter.
+DeepL, Google Translate or any model on OpenRouter.
 
 Pure SQL and PL/pgSQL, no compiled code, no superuser needed. Installable as an
 extension or as a plain script. Tested on PostgreSQL 14, 16 and 17; needs 9.5+.
@@ -262,8 +262,8 @@ so the work is split:
   configured language and put them on a queue, and functions that write the
   translations back without ever overwriting an existing one;
 - **worker** (`worker/pg_i18n_worker.py`): claims queue jobs, calls the
-  provider, writes back. Providers: `deepl`, `openrouter`, and `echo` (offline,
-  returns `[lang] text`, for tests).
+  provider, writes back. Providers: `deepl`, `google`, `openrouter`, and
+  `echo` (offline, returns `[lang] text`, for tests).
 
 ### Database side
 
@@ -342,6 +342,7 @@ filter on the view does not shrink the scan, the function form does.
 cd worker && pip install -r requirements.txt
 export PG_I18N_DSN=postgresql://user:pw@host/db
 export PG_I18N_PROVIDER=deepl DEEPL_API_KEY=...            # or
+export PG_I18N_PROVIDER=google GOOGLE_TRANSLATE_API_KEY=...  # or
 export PG_I18N_PROVIDER=openrouter OPENROUTER_API_KEY=... OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
 ./pg_i18n_worker.py            # runs forever: LISTEN/NOTIFY plus a poll every PG_I18N_POLL seconds
 ./pg_i18n_worker.py --once     # drain the queue and exit, for cron
@@ -362,12 +363,16 @@ the same environment variables. All settings:
 | `DEEPL_API_KEY` | | keys ending in `:fx` use the free endpoint |
 | `DEEPL_TARGET_MAP` | `en=EN-US,pt=PT-PT,zh=ZH-HANS` | DeepL regional targets, e.g. `en=EN-GB,pt=PT-BR` |
 | `DEEPL_FORMALITY` | | `more`, `less`, `prefer_more`, `prefer_less` |
+| `GOOGLE_TRANSLATE_API_KEY` | | API key with the Cloud Translation API enabled (Basic edition, v2) |
+| `GOOGLE_TRANSLATE_FORMAT` | `text` | `text` or `html`; use `html` for columns holding markup |
 | `OPENROUTER_API_KEY` | | |
 | `OPENROUTER_MODEL` | `openai/gpt-4o-mini` | any OpenRouter model id |
 
-DeepL makes one request per target language. OpenRouter gets one request per
-job asking for all target languages as a JSON object; the `hint` from the
-configuration is added to the prompt. Several workers can run at once: claims
+DeepL and Google make one request per target language; DeepL receives the
+`hint` as `context`, Google ignores it. Google's language codes are BCP-47
+(`en`, `pt-BR`, `zh-CN`), so name your languages that way if you use it.
+OpenRouter gets one request per job asking for all target languages as a
+JSON object; the `hint` from the configuration is added to the prompt. Several workers can run at once: claims
 use `FOR UPDATE SKIP LOCKED`.
 
 The worker only needs the ability to call the `i18n_queue_*` functions and to
@@ -456,7 +461,7 @@ make test                          # same as ./test.sh; also make test-ext, make
 ./test.sh                          # plain script, throwaway postgres:16-alpine container
 EXT=1 ./test.sh                    # build + install the extension with PGXS, then CREATE EXTENSION
 EXT=1 ./test.sh postgres:17-alpine # any official image
-./worker/test_worker.sh            # end-to-end: postgres + worker containers, echo provider
+./worker/test_worker.sh            # providers against a mock HTTP server, then end-to-end: postgres + worker, echo provider
 ```
 
 Or against any empty database: `psql -d empty_db -f test.sql` (add

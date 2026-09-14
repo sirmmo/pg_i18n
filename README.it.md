@@ -17,8 +17,8 @@ pg_i18n fornisce funzioni per leggere e scrivere una singola lingua da una
 colonna di questo tipo, uno strato di viste aggiornabili che permette a
 un'applicazione che conosce solo stringhe semplici di continuare a funzionare,
 una migrazione che trasforma il tutto in vero `jsonb`, e un'automazione
-opzionale che riempie le lingue mancanti tramite DeepL o un qualsiasi modello
-su OpenRouter.
+opzionale che riempie le lingue mancanti tramite DeepL, Google Translate o
+un qualsiasi modello su OpenRouter.
 
 Puro SQL e PL/pgSQL, nessun codice compilato, nessun superuser necessario.
 Installabile come estensione o come semplice script. Testato su PostgreSQL 14,
@@ -268,8 +268,8 @@ HTTP in modo portabile, quindi il lavoro è diviso:
   a cui manca una lingua configurata e le mettono in coda, e funzioni che
   scrivono le traduzioni senza mai sovrascriverne una esistente;
 - **worker** (`worker/pg_i18n_worker.py`): prende i job dalla coda, chiama il
-  provider, scrive il risultato. Provider: `deepl`, `openrouter` ed `echo`
-  (offline, restituisce `[lang] testo`, per i test).
+  provider, scrive il risultato. Provider: `deepl`, `google`, `openrouter`
+  ed `echo` (offline, restituisce `[lang] testo`, per i test).
 
 ### Lato database
 
@@ -349,6 +349,7 @@ a funzione sì.
 cd worker && pip install -r requirements.txt
 export PG_I18N_DSN=postgresql://user:pw@host/db
 export PG_I18N_PROVIDER=deepl DEEPL_API_KEY=...            # oppure
+export PG_I18N_PROVIDER=google GOOGLE_TRANSLATE_API_KEY=...  # oppure
 export PG_I18N_PROVIDER=openrouter OPENROUTER_API_KEY=... OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
 ./pg_i18n_worker.py            # gira per sempre: LISTEN/NOTIFY più un poll ogni PG_I18N_POLL secondi
 ./pg_i18n_worker.py --once     # svuota la coda ed esce, per cron
@@ -369,12 +370,17 @@ con le stesse variabili d'ambiente. Tutte le impostazioni:
 | `DEEPL_API_KEY` | | le chiavi che finiscono in `:fx` usano l'endpoint gratuito |
 | `DEEPL_TARGET_MAP` | `en=EN-US,pt=PT-PT,zh=ZH-HANS` | varianti regionali DeepL, es. `en=EN-GB,pt=PT-BR` |
 | `DEEPL_FORMALITY` | | `more`, `less`, `prefer_more`, `prefer_less` |
+| `GOOGLE_TRANSLATE_API_KEY` | | chiave API con la Cloud Translation API abilitata (edizione Basic, v2) |
+| `GOOGLE_TRANSLATE_FORMAT` | `text` | `text` oppure `html`; usate `html` per colonne che contengono markup |
 | `OPENROUTER_API_KEY` | | |
 | `OPENROUTER_MODEL` | `openai/gpt-4o-mini` | qualsiasi id di modello OpenRouter |
 
-DeepL riceve una richiesta per ogni lingua di destinazione. OpenRouter riceve
-una richiesta per job con tutte le lingue richieste come oggetto JSON; lo
-`hint` della configurazione viene aggiunto al prompt. Più worker possono girare
+DeepL e Google ricevono una richiesta per ogni lingua di destinazione; DeepL
+riceve lo `hint` come `context`, Google lo ignora. I codici lingua di Google
+sono BCP-47 (`en`, `pt-BR`, `zh-CN`), quindi se lo usate nominate le lingue
+in quel modo. OpenRouter riceve una richiesta per job con tutte le lingue
+richieste come oggetto JSON; lo `hint` della configurazione viene aggiunto
+al prompt. Più worker possono girare
 in parallelo: i claim usano `FOR UPDATE SKIP LOCKED`.
 
 Il worker ha bisogno solo di poter chiamare le funzioni `i18n_queue_*` e di
@@ -466,7 +472,7 @@ make test                          # equivale a ./test.sh; esistono anche make t
 ./test.sh                          # script semplice, container postgres:16-alpine usa e getta
 EXT=1 ./test.sh                    # compila e installa l'estensione con PGXS, poi CREATE EXTENSION
 EXT=1 ./test.sh postgres:17-alpine # qualsiasi immagine ufficiale
-./worker/test_worker.sh            # end-to-end: container postgres + worker, provider echo
+./worker/test_worker.sh            # provider contro un server HTTP finto, poi end-to-end: postgres + worker, provider echo
 ```
 
 Oppure su qualsiasi database vuoto: `psql -d db_vuoto -f test.sql`

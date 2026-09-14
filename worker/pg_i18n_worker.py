@@ -9,7 +9,7 @@ Configuration is by environment variables:
 
   PG_I18N_DSN            libpq connection string (or DATABASE_URL)
   PG_I18N_SCHEMA         schema pg_i18n is installed in, if not on the search_path
-  PG_I18N_PROVIDER       default provider: deepl | openrouter | echo   (default: echo)
+  PG_I18N_PROVIDER       default provider: deepl | google | openrouter | echo   (default: echo)
   PG_I18N_BATCH          jobs claimed per round                        (default: 10)
   PG_I18N_POLL           seconds between polls when idle               (default: 30)
   PG_I18N_MAX_ATTEMPTS   attempts before a job is marked 'error'       (default: 3)
@@ -19,6 +19,10 @@ Configuration is by environment variables:
   DEEPL_API_URL          override endpoint (default chosen from the key)
   DEEPL_TARGET_MAP       e.g. "en=EN-GB,pt=PT-BR" for DeepL's regional targets
   DEEPL_FORMALITY        default | more | less | prefer_more | prefer_less
+
+  GOOGLE_TRANSLATE_API_KEY  Google Cloud Translation API key (Basic / v2 API)
+  GOOGLE_TRANSLATE_URL   (default: https://translation.googleapis.com/language/translate/v2)
+  GOOGLE_TRANSLATE_FORMAT   text | html                     (default: text)
 
   OPENROUTER_API_KEY     OpenRouter key
   OPENROUTER_MODEL       model id                       (default: openai/gpt-4o-mini)
@@ -105,6 +109,35 @@ class DeepLProvider:
         return out
 
 
+class GoogleTranslateProvider:
+    """Google Cloud Translation, Basic edition (v2 REST API with an API key).
+
+    Enable "Cloud Translation API" in the project and create an API key.
+    The v2 API takes one target language per request; source languages are
+    BCP-47 codes such as 'en', 'pt-BR', 'zh-CN'.
+    """
+    name = "google"
+
+    def __init__(self):
+        self.key = os.environ.get("GOOGLE_TRANSLATE_API_KEY")
+        if not self.key:
+            raise SystemExit("GOOGLE_TRANSLATE_API_KEY is not set")
+        self.url = os.environ.get("GOOGLE_TRANSLATE_URL",
+                                  "https://translation.googleapis.com/language/translate/v2")
+        self.format = os.environ.get("GOOGLE_TRANSLATE_FORMAT", "text")
+
+    def translate(self, text, source_lang, target_langs, hint=None):
+        out = {}
+        for lang in target_langs:
+            payload = {"q": [text], "source": source_lang, "target": lang, "format": self.format}
+            data = _http_json(self.url, payload, {"X-Goog-Api-Key": self.key})
+            try:
+                out[lang] = data["data"]["translations"][0]["translatedText"]
+            except (KeyError, IndexError, TypeError):
+                raise ProviderError(f"unexpected Google response: {json.dumps(data)[:300]}")
+        return out
+
+
 class OpenRouterProvider:
     name = "openrouter"
 
@@ -162,7 +195,8 @@ def _parse_json_object(content):
     return obj
 
 
-PROVIDERS = {"echo": EchoProvider, "deepl": DeepLProvider, "openrouter": OpenRouterProvider}
+PROVIDERS = {"echo": EchoProvider, "deepl": DeepLProvider, "google": GoogleTranslateProvider,
+             "openrouter": OpenRouterProvider}
 
 
 # ---------------------------------------------------------------- worker
