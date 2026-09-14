@@ -437,6 +437,6 @@ BEGIN
 
   EXECUTE format(
     'CREATE TRIGGER i18n_write INSTEAD OF INSERT OR UPDATE OR DELETE ON %I.%I '
-    'FOR EACH ROW EXECUTE FUNCTION i18n_view_trigger(%L, %L, %L)',
+    'FOR EACH ROW EXECUTE PROCEDURE i18n_view_trigger(%L, %L, %L)',
     vschema, p_view, p_table::text, p_cols::text, pkcols::text);
 END $$;

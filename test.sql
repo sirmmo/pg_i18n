@@ -3,6 +3,7 @@
 CREATE EXTENSION pg_i18n;
 \else
 \i i18n.sql
+\i i18n_auto.sql
 \endif
 
 -- scalar functions
@@ -136,3 +137,66 @@ SELECT id, sku, name, description FROM products_i18n ORDER BY id;
 CREATE INDEX ON products_i18n (i18n_get(name, 'it', 'en'));
 CREATE INDEX ON products_i18n USING gin (name);
 SELECT sku FROM products_i18n WHERE name @> '{"it":"Legacy IT"}';
+
+-- ================================================================ automation
+SELECT i18n_missing('Chair', '{en,it,de}', 'en')                     AS m1,  -- {de,it}
+       i18n_missing('{"en":"Chair","it":""}', '{en,it,de}', 'en')    AS m2,  -- {de,it}  (empty counts as missing)
+       i18n_missing('{"en":"Chair","it":"Sedia"}'::jsonb, '{en,it}', 'en') AS m3, -- {}
+       i18n_exact('Chair', 'it', 'en')                                AS e1,  -- NULL
+       i18n_exact('Chair', 'en', 'en')                                AS e2,  -- Chair
+       i18n_fill('Chair', '{"it":"Sedia","en":"IGNORED","de":""}')   AS f1,  -- {"en":"Chair","it":"Sedia"}
+       i18n_fill('{"en":"Chair"}'::jsonb, '{"de":"Stuhl"}')           AS f2;  -- {"de":"Stuhl","en":"Chair"}
+SELECT * FROM i18n_source('{"fr":"Chaise"}', 'en', 'en');             -- fr, Chaise
+SELECT * FROM i18n_source('', 'en', 'en');                            -- NULL, NULL
+
+CREATE TABLE articles (id serial PRIMARY KEY, title text, body jsonb);
+INSERT INTO articles (title, body) VALUES ('Hello', '{"en":"World"}');
+
+SELECT i18n_auto_enable('articles', 'title', '{en,it,de}', NULL, 'echo', 'news headlines');
+SELECT i18n_auto_enable('articles', 'body',  '{en,it}');
+SELECT i18n_backfill('articles', 'title') AS queued_title;             -- 1
+SELECT i18n_backfill('articles', 'body')  AS queued_body;              -- 1
+
+-- trigger: insert and update enqueue, complete rows do not
+INSERT INTO articles (title) VALUES ('{"en":"Full","it":"Pieno","de":"Voll"}');   -- nothing missing
+INSERT INTO articles (title) VALUES ('{"it":"Solo italiano"}');                    -- source it, targets {de,en}
+UPDATE articles SET title = 'Hello again' WHERE id = 1;                            -- dedup into the open job
+
+SELECT id, tbl, col, pk, source_lang, source_text, target_langs, provider, hint, status
+FROM i18n_queue ORDER BY id;
+-- expected 3 open jobs: (articles,title,{"id":1},en,'Hello again',{de,it},echo,'news headlines')
+--                       (articles,body,{"id":1},en,World,{it})
+--                       (articles,title,{"id":3},it,'Solo italiano',{de,en})
+
+-- worker side, simulated
+SELECT id, target_langs, status, attempts, claimed_by FROM i18n_queue_claim(2, 'test-worker') ORDER BY id;
+SELECT id, status FROM i18n_queue ORDER BY id;                        -- 1,2 processing; 3 pending
+SELECT i18n_queue_complete(1, '{"it":"Ciao di nuovo","de":"Hallo nochmal"}');
+SELECT i18n_queue_fail(2, 'boom', 3);                                  -- back to pending (attempt 1 < 3)
+SELECT id, title, body FROM articles ORDER BY id;
+SELECT id, status, attempts, error FROM i18n_queue ORDER BY id;
+
+-- a human translation arriving meanwhile is not overwritten
+SELECT id FROM i18n_queue_claim(1, 'w2');                              -- job 2 (body)
+UPDATE articles SET body = i18n_set(body, 'it', 'Mondo (umano)', 'en') WHERE id = 1;
+SELECT i18n_queue_complete(2, '{"it":"Mondo (macchina)"}');
+SELECT body FROM articles WHERE id = 1;                                -- it = Mondo (umano)
+
+-- stale requeue and error after max attempts
+SELECT id FROM i18n_queue_claim(1, 'w3');                              -- job 3
+UPDATE i18n_queue SET updated_at = now() - interval '1 hour' WHERE id = 3;
+SELECT i18n_queue_requeue_stale('10 minutes') AS requeued;             -- 1
+SELECT i18n_queue_fail(3, 'x', 1);                                     -- attempts 2 >= 1 -> error
+SELECT id, status FROM i18n_queue ORDER BY id;                         -- done, done, error
+
+-- disable removes the trigger
+SELECT i18n_auto_disable('articles', 'title');
+INSERT INTO articles (title) VALUES ('No queue');
+SELECT count(*) AS open_jobs FROM i18n_queue WHERE status IN ('pending','processing');  -- 0
+
+-- automation on a wrapped table: writes through the view enqueue too
+SELECT i18n_auto_enable('products_i18n', 'name', '{en,it,de}');
+SET i18n.lang = 'it';
+INSERT INTO products (sku, name) VALUES ('F', 'Scaffale');
+RESET i18n.lang;
+SELECT source_lang, source_text, target_langs FROM i18n_queue WHERE tbl = 'products_i18n'::regclass; -- it, Scaffale, {de,en}

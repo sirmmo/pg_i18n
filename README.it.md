@@ -16,7 +16,9 @@ Chair
 pg_i18n fornisce funzioni per leggere e scrivere una singola lingua da una
 colonna di questo tipo, uno strato di viste aggiornabili che permette a
 un'applicazione che conosce solo stringhe semplici di continuare a funzionare,
-e una migrazione che trasforma il tutto in vero `jsonb`.
+una migrazione che trasforma il tutto in vero `jsonb`, e un'automazione
+opzionale che riempie le lingue mancanti tramite DeepL o un qualsiasi modello
+su OpenRouter.
 
 Puro SQL e PL/pgSQL, nessun codice compilato, nessun superuser necessario.
 Installabile come estensione o come semplice script. Testato su PostgreSQL 14,
@@ -49,7 +51,7 @@ eliminatela e ricreatela invece di usare `ALTER EXTENSION ... SET SCHEMA`.
 ### Come semplice script
 
 ```sh
-psql -d mydb -f i18n.sql
+psql -d mydb -f i18n.sql -f i18n_auto.sql     # i18n_auto.sql è opzionale, vedi Automazione
 ```
 
 Tutto viene creato nel primo schema del `search_path` corrente. Rieseguire
@@ -203,6 +205,97 @@ un oggetto di traduzioni, per esempio `{"foo": 1}`; vengono promossi come
 stringhe semplici, che probabilmente non è quello che volete, quindi
 controllateli prima.
 
+## Automazione: riempire le lingue mancanti
+
+`i18n_auto.sql` (incluso nell'estensione) mantiene compilate le lingue scelte
+tramite un servizio di traduzione esterno. PostgreSQL non può chiamare API
+HTTP in modo portabile, quindi il lavoro è diviso:
+
+- **database**: una tabella di configurazione, trigger che rilevano le righe
+  a cui manca una lingua configurata e le mettono in coda, e funzioni che
+  scrivono le traduzioni senza mai sovrascriverne una esistente;
+- **worker** (`worker/pg_i18n_worker.py`): prende i job dalla coda, chiama il
+  provider, scrive il risultato. Provider: `deepl`, `openrouter` ed `echo`
+  (offline, restituisce `[lang] testo`, per i test).
+
+### Lato database
+
+```sql
+-- mantieni en, it e de compilate per products.name; hint viene passato ai provider LLM
+SELECT i18n_auto_enable('products_i18n', 'name', '{en,it,de}',
+                        NULL,                     -- lingua sorgente (NULL: lingua predefinita, altrimenti la prima disponibile)
+                        'openrouter',             -- provider (NULL: predefinito del worker)
+                        'nomi di prodotti di arredamento, non tradurre i marchi');
+
+SELECT i18n_backfill('products_i18n', 'name');    -- mette in coda ogni riga esistente a cui manca una lingua
+SELECT i18n_auto_disable('products_i18n', 'name');
+```
+
+`i18n_auto_enable` registra la configurazione in `i18n_auto` e aggiunge un
+trigger `AFTER INSERT OR UPDATE OF col`. Ogni scrittura che lascia una lingua
+configurata mancante o vuota crea un job in `i18n_queue` (un solo job aperto
+per riga e colonna; scritture ripetute lo aggiornano) e invia un
+`NOTIFY i18n_queue`. Anche le scritture attraverso una vista generata contano.
+
+Il testo sorgente è la lingua sorgente configurata se ha un testo, altrimenti
+la prima lingua non vuota. Vengono richieste solo le lingue mancanti e
+vengono scritte solo le lingue mancanti: una traduzione umana inserita
+mentre un job è in corso ha la precedenza. Cambiare il testo sorgente non
+ritraduce le lingue già esistenti.
+
+I job passano da `pending` a `processing` e poi `done` oppure `error` (dopo
+`max_attempts`). Per controllarli:
+
+```sql
+SELECT status, count(*) FROM i18n_queue GROUP BY 1;
+SELECT id, tbl, col, pk, target_langs, attempts, error FROM i18n_queue WHERE status = 'error';
+UPDATE i18n_queue SET status = 'pending', attempts = 0 WHERE status = 'error';   -- riprova
+```
+
+Funzioni di supporto usabili da sole: `i18n_missing(v, langs)` restituisce
+quali tra `langs` sono assenti o vuote, `i18n_fill(v, '{"it": "..."}')`
+aggiunge solo le lingue ancora mancanti, `i18n_exact(v, lang, default)` legge
+una lingua senza ripiego.
+
+### Worker
+
+```sh
+cd worker && pip install -r requirements.txt
+export PG_I18N_DSN=postgresql://user:pw@host/db
+export PG_I18N_PROVIDER=deepl DEEPL_API_KEY=...            # oppure
+export PG_I18N_PROVIDER=openrouter OPENROUTER_API_KEY=... OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
+./pg_i18n_worker.py            # gira per sempre: LISTEN/NOTIFY più un poll ogni PG_I18N_POLL secondi
+./pg_i18n_worker.py --once     # svuota la coda ed esce, per cron
+```
+
+Oppure come container: `docker build -t pg_i18n-worker worker/` e avviatelo
+con le stesse variabili d'ambiente. Tutte le impostazioni:
+
+| Variabile | Predefinito | Significato |
+|---|---|---|
+| `PG_I18N_DSN` (o `DATABASE_URL`) | | stringa di connessione libpq |
+| `PG_I18N_SCHEMA` | | schema in cui è installato pg_i18n, se non è nel search_path |
+| `PG_I18N_PROVIDER` | `echo` | provider per i job la cui configurazione non ne indica uno |
+| `PG_I18N_BATCH` | `10` | job presi per ciclo |
+| `PG_I18N_POLL` | `30` | secondi tra un poll e l'altro quando la coda è vuota |
+| `PG_I18N_MAX_ATTEMPTS` | `3` | fallimenti prima che un job sia marcato `error` |
+| `PG_I18N_STALE_MINUTES` | `10` | i job rimasti `processing` per questo tempo vengono rimessi in coda |
+| `DEEPL_API_KEY` | | le chiavi che finiscono in `:fx` usano l'endpoint gratuito |
+| `DEEPL_TARGET_MAP` | `en=EN-US,pt=PT-PT,zh=ZH-HANS` | varianti regionali DeepL, es. `en=EN-GB,pt=PT-BR` |
+| `DEEPL_FORMALITY` | | `more`, `less`, `prefer_more`, `prefer_less` |
+| `OPENROUTER_API_KEY` | | |
+| `OPENROUTER_MODEL` | `openai/gpt-4o-mini` | qualsiasi id di modello OpenRouter |
+
+DeepL riceve una richiesta per ogni lingua di destinazione. OpenRouter riceve
+una richiesta per job con tutte le lingue richieste come oggetto JSON; lo
+`hint` della configurazione viene aggiunto al prompt. Più worker possono girare
+in parallelo: i claim usano `FOR UPDATE SKIP LOCKED`.
+
+Il worker ha bisogno solo di poter chiamare le funzioni `i18n_queue_*` e di
+aggiornare le tabelle di destinazione. Per usare un altro servizio aggiungete
+a `PROVIDERS` una classe con un metodo `translate(text, source_lang,
+target_langs, hint)` che restituisce `{lang: testo}`.
+
 ## Ricerca con LIKE
 
 Tutto questo funziona sulle colonne `text` originali, prima di qualsiasi
@@ -277,6 +370,7 @@ forma esplicita.
 ./test.sh                          # script semplice, container postgres:16-alpine usa e getta
 EXT=1 ./test.sh                    # compila e installa l'estensione con PGXS, poi CREATE EXTENSION
 EXT=1 ./test.sh postgres:17-alpine # qualsiasi immagine ufficiale
+./worker/test_worker.sh            # end-to-end: container postgres + worker, provider echo
 ```
 
 Oppure su qualsiasi database vuoto: `psql -d db_vuoto -f test.sql`

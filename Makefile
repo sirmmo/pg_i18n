@@ -10,9 +10,9 @@ include $(PGXS)
 
 # The extension script is the standalone i18n.sql with the usual guard on top,
 # so there is a single source of truth for both install methods.
-$(EXTENSION)--$(EXTVERSION).sql: i18n.sql
+$(EXTENSION)--$(EXTVERSION).sql: i18n.sql i18n_auto.sql
 	printf '\\echo Use "CREATE EXTENSION %s" to load this file. \\quit\n\n' $(EXTENSION) > $@
-	cat $< >> $@
+	cat $^ >> $@
 
 test:
 	./test.sh
@@ -20,4 +20,7 @@ test:
 test-ext:
 	EXT=1 ./test.sh
 
-.PHONY: test test-ext
+test-worker:
+	./worker/test_worker.sh
+
+.PHONY: test test-ext test-worker
