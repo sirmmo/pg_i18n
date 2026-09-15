@@ -104,16 +104,47 @@ funzionano prima e dopo la [migrazione](#migrare-a-jsonb).
 
 | Funzione | Volatilità | Descrizione |
 |---|---|---|
-| `i18n_get(v, lang, fallback)` | IMMUTABLE | Traduzione per `lang`, altrimenti `fallback`, altrimenti la prima lingua disponibile (ordinata per chiave). Una stringa semplice viene restituita invariata. |
-| `i18n_get(v, lang)` | STABLE | Il ripiego è `i18n.default_lang`. |
-| `i18n_get(v)` | STABLE | La lingua è `i18n.lang`. |
+| `i18n_get(v, lang, default_lang, mode)` | IMMUTABLE | Risolutore di base. `mode` è `any` (`lang`, poi `default_lang`, poi la prima lingua non vuota per chiave), `default` (`lang`, poi `default_lang`) oppure `none` (solo `lang`). NULL se nulla corrisponde. Una stringa semplice è il testo in `default_lang`. |
+| `i18n_get(v, lang, fallback)` | IMMUTABLE | Come il modo `any` con `fallback` come lingua predefinita. |
+| `i18n_exact(v, lang, default_lang)` | IMMUTABLE | Come il modo `none`: esattamente `lang` oppure NULL. |
+| `i18n_get(v, lang)` | STABLE | Modo da `i18n.fallback`, lingua predefinita da `i18n.default_lang`, valore mancante da `i18n.missing`. |
+| `i18n_get(v)` | STABLE | Come sopra con `lang` = `i18n.lang`. |
 | `i18n_langs(v)` | IMMUTABLE | `text[]` delle lingue presenti. `{}` per una stringa semplice. |
 | `i18n_is_json(v)` | IMMUTABLE | Vero solo per un oggetto JSON i cui valori sono tutti stringhe: una colonna di testo che per caso contiene altro JSON viene comunque trattata come stringa semplice. |
 | `i18n_values(v)` | IMMUTABLE | `text[]` di tutte le traduzioni. Una stringa semplice dà un array di un elemento. |
 | `i18n_all(v)` | IMMUTABLE | Tutte le traduzioni unite da un a capo. Per ricerche `LIKE` su tutte le lingue. |
 
-Negli indici su espressione usate la forma a tre argomenti; le forme più corte
-dipendono dallo stato di sessione e non sono indicizzabili.
+Negli indici su espressione usate le forme a tre o quattro argomenti; le
+forme più corte dipendono dallo stato di sessione e non sono indicizzabili.
+
+Una traduzione a stringa vuota conta come non impostata, quindi
+`{"en": "Chair", "it": ""}` ripiega sull'inglese per l'italiano e compare
+come mancante nelle viste dell'automazione.
+
+#### Traduzioni mancanti: ripiego, NULL o stringa vuota
+
+Per default una lingua non impostata ripiega fin dove serve, così
+l'applicazione riceve sempre un testo. Due impostazioni di sessione cambiano
+questo comportamento per le forme guidate dalla sessione e per le viste
+generate:
+
+```sql
+SET i18n.fallback = 'none';     -- any (predefinito) | default | none
+SET i18n.missing  = 'empty';    -- null (predefinito) | empty
+
+SELECT i18n_get('{"en":"Chair","it":"Sedia"}', 'de');
+-- fallback any:      Chair
+-- fallback default:  Chair
+-- fallback none:     NULL, oppure '' con i18n.missing = 'empty'
+SELECT i18n_get('{"fr":"Chaise"}', 'de');
+-- fallback any:      Chaise
+-- fallback default:  NULL / ''
+```
+
+Un valore NULL della colonna resta NULL qualunque sia l'impostazione. Per una
+scelta fissa in una singola query usate le forme immutabili:
+`i18n_exact(v, 'de', 'en')` oppure `i18n_get(v, 'de', 'en', 'default')`, con
+`COALESCE(..., '')` se volete la stringa vuota.
 
 ### Scrittura
 
@@ -153,7 +184,6 @@ SELECT i18n_set('{"en":"Chair","it":"Sedia"}', 'it', NULL, 'en'); -- {"en": "Cha
 | Funzione | Descrizione |
 |---|---|
 | `i18n_missing(v, langs [, default_lang])` | `text[]` delle lingue di `langs` assenti o vuote in `v`. IMMUTABLE con il terzo argomento. |
-| `i18n_exact(v, lang, default_lang)` | Traduzione esattamente per `lang`, senza ripiego. Una stringa semplice conta come `default_lang`. IMMUTABLE. |
 | `i18n_fill(v, traduzioni)` | Restituisce `v` con le lingue dell'oggetto `{"lang": "testo"}` aggiunte, solo dove ancora mancanti. STABLE. |
 | `i18n_auto_enable(tabella, col, langs [, source_lang, provider, hint])` | Configura `col` perché resti compilata per `langs` e collega il trigger. |
 | `i18n_auto_disable(tabella, col)` | Rimuove il trigger e disabilita la configurazione. |
@@ -178,6 +208,8 @@ come estensione.
 |---|---|---|
 | `i18n.lang` | il valore di `i18n.default_lang` | `i18n_get` a un argomento, `i18n_set` a due argomenti, viste generate |
 | `i18n.default_lang` | `en` | ripiego in lettura, lingua di promozione in scrittura |
+| `i18n.fallback` | `any` | fin dove ripiega la `i18n_get` guidata dalla sessione: `any`, `default` o `none` |
+| `i18n.missing` | `null` | come viene letta una traduzione mancante: `null` o `empty` |
 
 Sono normali GUC personalizzati. Si impostano per connessione (`SET`), per
 transazione (`SET LOCAL`, la scelta giusta dietro un pooler in modalità
@@ -206,7 +238,8 @@ riscrive attraverso `i18n_set`. La tabella deve avere una chiave primaria.
 L'applicazione continua quindi a usare `products` e deve solo avere
 `i18n.lang` impostata (vedi sopra). Quello che vede:
 
-- **SELECT** restituisce la traduzione per `i18n.lang`, con ripiego.
+- **SELECT** restituisce la traduzione per `i18n.lang`, seguendo
+  `i18n.fallback` e `i18n.missing`.
 - **INSERT** salva `{"<lang>": valore}`. Le colonne omesse dall'insert
   mantengono i loro default (serial, `now()`, ...).
 - **UPDATE** cambia solo la lingua corrente dentro il JSON, lasciando intatte
@@ -445,9 +478,12 @@ forma esplicita.
 
 ## Dettagli di comportamento
 
-- L'ordine di ripiego in lettura è sempre: lingua richiesta, lingua di
-  ripiego, prima lingua disponibile ordinata per chiave. Impostate il ripiego
-  esplicitamente se "la prima disponibile" non è accettabile.
+- L'ordine di ripiego in lettura è: lingua richiesta, lingua predefinita,
+  prima lingua non vuota ordinata per chiave. `i18n.fallback` o l'argomento
+  `mode` lo fermano prima; una traduzione mancante si legge allora come NULL,
+  oppure `''` con `i18n.missing = 'empty'`.
+- Una traduzione a stringa vuota è trattata ovunque come non impostata: le
+  letture la scavalcano, l'automazione la conta come mancante e la compila.
 - `i18n_is_json` richiede un oggetto i cui valori sono tutti stringhe. Un
   valore salvato come `{"en": "a", "count": 3}` per pg_i18n è una stringa
   semplice e verrà promosso in blocco alla scrittura.

@@ -101,16 +101,46 @@ matching the column type, so the same queries work before and after the
 
 | Function | Volatility | Description |
 |---|---|---|
-| `i18n_get(v, lang, fallback)` | IMMUTABLE | Translation for `lang`, else `fallback`, else the first available language (sorted by key). A plain string is returned unchanged. |
-| `i18n_get(v, lang)` | STABLE | Fallback is `i18n.default_lang`. |
-| `i18n_get(v)` | STABLE | Language is `i18n.lang`. |
+| `i18n_get(v, lang, default_lang, mode)` | IMMUTABLE | Core resolver. `mode` is `any` (`lang`, then `default_lang`, then the first non-empty language by key), `default` (`lang`, then `default_lang`) or `none` (`lang` only). NULL when nothing matches. A plain string is the `default_lang` text. |
+| `i18n_get(v, lang, fallback)` | IMMUTABLE | Same as mode `any` with `fallback` as the default language. |
+| `i18n_exact(v, lang, default_lang)` | IMMUTABLE | Same as mode `none`: exactly `lang` or NULL. |
+| `i18n_get(v, lang)` | STABLE | Mode from `i18n.fallback`, default language from `i18n.default_lang`, missing value from `i18n.missing`. |
+| `i18n_get(v)` | STABLE | As above with `lang` = `i18n.lang`. |
 | `i18n_langs(v)` | IMMUTABLE | `text[]` of languages present. `{}` for a plain string. |
 | `i18n_is_json(v)` | IMMUTABLE | True only for a JSON object whose values are all strings, so a text column that happens to contain some other JSON is still treated as a plain string. |
 | `i18n_values(v)` | IMMUTABLE | `text[]` of every translation. A plain string gives a one-element array. |
 | `i18n_all(v)` | IMMUTABLE | Every translation joined by newline. For `LIKE` search across languages. |
 
-Use the three-argument form in expression indexes; the shorter forms depend on
-session state and cannot be indexed.
+Use the three- or four-argument forms in expression indexes; the shorter forms
+depend on session state and cannot be indexed.
+
+An empty-string translation counts as not set, so `{"en": "Chair", "it": ""}`
+falls through to English for Italian and shows up as missing in the
+automation views.
+
+#### Missing translations: fallback, NULL or empty string
+
+By default a language that is not set falls back as far as needed, so the
+application always gets some text. Two session settings change that for the
+session-driven forms and for the wrapped views:
+
+```sql
+SET i18n.fallback = 'none';     -- any (default) | default | none
+SET i18n.missing  = 'empty';    -- null (default) | empty
+
+SELECT i18n_get('{"en":"Chair","it":"Sedia"}', 'de');
+-- fallback any:      Chair
+-- fallback default:  Chair
+-- fallback none:     NULL, or '' with i18n.missing = 'empty'
+SELECT i18n_get('{"fr":"Chaise"}', 'de');
+-- fallback any:      Chaise
+-- fallback default:  NULL / ''
+```
+
+A NULL column value stays NULL whatever the settings. For a fixed choice in
+one query, use the immutable forms: `i18n_exact(v, 'de', 'en')` or
+`i18n_get(v, 'de', 'en', 'default')`, with `COALESCE(..., '')` if you want
+the empty string.
 
 ### Writing
 
@@ -150,7 +180,6 @@ SELECT i18n_set('{"en":"Chair","it":"Sedia"}', 'it', NULL, 'en'); -- {"en": "Cha
 | Function | Description |
 |---|---|
 | `i18n_missing(v, langs [, default_lang])` | `text[]` of the languages in `langs` that are absent or empty in `v`. IMMUTABLE with the third argument. |
-| `i18n_exact(v, lang, default_lang)` | Translation for exactly `lang`, no fallback. A plain string counts as `default_lang`. IMMUTABLE. |
 | `i18n_fill(v, translations)` | Return `v` with the languages from the `{"lang": "text"}` object added, only where still missing. STABLE. |
 | `i18n_auto_enable(table, col, langs [, source_lang, provider, hint])` | Configure `col` to be kept filled for `langs` and attach the trigger. |
 | `i18n_auto_disable(table, col)` | Drop the trigger and mark the configuration disabled. |
@@ -175,6 +204,8 @@ extension.
 |---|---|---|
 | `i18n.lang` | value of `i18n.default_lang` | one-argument `i18n_get`, two-argument `i18n_set`, wrapped views |
 | `i18n.default_lang` | `en` | fallback on read, promotion language on write |
+| `i18n.fallback` | `any` | how far the session-driven `i18n_get` falls back: `any`, `default` or `none` |
+| `i18n.missing` | `null` | what a missing translation reads as: `null` or `empty` |
 
 These are ordinary custom GUCs. Set them per connection (`SET`), per transaction
 (`SET LOCAL`, the right choice behind a transaction-mode pooler such as
@@ -203,7 +234,8 @@ writes back through `i18n_set`. The table needs a primary key.
 The application then keeps using `products` and only has to have `i18n.lang`
 set (see above). What it sees:
 
-- **SELECT** returns the translation for `i18n.lang`, with fallback.
+- **SELECT** returns the translation for `i18n.lang`, following
+  `i18n.fallback` and `i18n.missing`.
 - **INSERT** stores `{"<lang>": value}`. Columns left out of the insert keep
   their defaults (serials, `now()`, ...).
 - **UPDATE** changes only the current language inside the JSON, leaving the
@@ -436,9 +468,12 @@ matters.
 
 ## Behaviour details
 
-- Fallback order on read is always: requested language, fallback language,
-  first available language sorted by key. Set the fallback explicitly if
-  "first available" is not acceptable.
+- Fallback order on read is: requested language, default language, first
+  non-empty language sorted by key. `i18n.fallback` or the `mode` argument
+  stop it earlier; a missing translation then reads as NULL, or `''` with
+  `i18n.missing = 'empty'`.
+- An empty-string translation is treated as not set everywhere: reads fall
+  through it, automation counts it as missing and will fill it.
 - `i18n_is_json` requires an object whose values are all strings. A stored
   value like `{"en": "a", "count": 3}` is a plain string as far as pg_i18n is
   concerned and will be promoted wholesale on write.

@@ -10,7 +10,6 @@
 --
 -- Public API
 --   i18n_missing(v, langs [, default_lang])   -> text[] : languages in langs absent or empty in v
---   i18n_exact(v, lang, default_lang)         -> text   : translation for lang, no fallback
 --   i18n_fill(v, translations jsonb)          -> same type as v : add only languages still missing
 --   i18n_auto_enable(tbl, col, langs [, source_lang, provider, hint])
 --   i18n_auto_disable(tbl, col)
@@ -74,28 +73,6 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------- detection
-
--- Translation for exactly lang, no fallback. A plain string counts as default_lang.
-CREATE OR REPLACE FUNCTION i18n_exact(v jsonb, lang text, default_lang text) RETURNS text
-LANGUAGE sql IMMUTABLE AS $$
-  SELECT CASE
-    WHEN v IS NULL THEN NULL
-    WHEN jsonb_typeof(v) = 'object' THEN v ->> lang
-    WHEN lang = default_lang AND jsonb_typeof(v) = 'string' THEN v #>> '{}'
-    WHEN lang = default_lang THEN v::text
-    ELSE NULL
-  END
-$$;
-
-CREATE OR REPLACE FUNCTION i18n_exact(v text, lang text, default_lang text) RETURNS text
-LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
-  SELECT CASE
-    WHEN v IS NULL THEN NULL
-    WHEN i18n_is_json(v) THEN v::jsonb ->> lang
-    WHEN lang = default_lang THEN v
-    ELSE NULL
-  END
-$$;
 
 -- Languages from langs that are absent or empty in v.
 CREATE OR REPLACE FUNCTION i18n_missing(v jsonb, langs text[], default_lang text) RETURNS text[]

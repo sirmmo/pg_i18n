@@ -12,13 +12,17 @@
 -- Session settings (custom GUCs, no postgresql.conf change needed):
 --   SET i18n.lang = 'it';          -- language used by the 1-arg functions / views
 --   SET i18n.default_lang = 'en';  -- fallback + language a plain string is promoted to
+--   SET i18n.fallback = 'any';     -- any | default | none: how far i18n_get falls back
+--   SET i18n.missing = 'null';     -- null | empty: what a missing translation reads as
 --
 -- Public API
 --   i18n_is_json(v)                 -> bool   : is v a {"lang":"text",...} object?
 --   i18n_langs(v)                   -> text[] : languages present in v
---   i18n_get(v)                     -> text   : translation for session lang
---   i18n_get(v, lang)               -> text   : translation, fallback to default lang
---   i18n_get(v, lang, fallback)     -> text   : IMMUTABLE, usable in expression indexes
+--   i18n_get(v)                     -> text   : translation for session lang, session policy
+--   i18n_get(v, lang)               -> text   : translation for lang, session policy
+--   i18n_get(v, lang, fallback)     -> text   : IMMUTABLE, lang -> fallback -> first available
+--   i18n_get(v, lang, dflt, mode)   -> text   : IMMUTABLE, mode any | default | none; NULL when missing
+--   i18n_exact(v, lang, dflt)       -> text   : IMMUTABLE, = mode none
 --   i18n_set(v, lang, val)          -> text   : return v with lang set to val (NULL val removes lang)
 --   i18n_set(v, lang, val, promote) -> text   : same, plain-string v is promoted as {promote: v}
 --   i18n_values(v)                  -> text[] : every translation (for search across languages)
@@ -43,6 +47,27 @@ $$;
 CREATE OR REPLACE FUNCTION i18n_lang() RETURNS text
 LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
   SELECT COALESCE(NULLIF(current_setting('i18n.lang', true), ''), i18n_default_lang())
+$$;
+
+-- Fallback policy for the session-driven i18n_get forms and the wrapped views:
+--   any     (default) requested lang -> default lang -> first available
+--   default           requested lang -> default lang -> missing
+--   none              requested lang only
+CREATE OR REPLACE FUNCTION i18n_fallback() RETURNS text
+LANGUAGE plpgsql STABLE AS $$
+DECLARE m text := COALESCE(NULLIF(current_setting('i18n.fallback', true), ''), 'any');
+BEGIN
+  IF m NOT IN ('any', 'default', 'none') THEN
+    RAISE EXCEPTION 'i18n.fallback must be any, default or none (got %)', m;
+  END IF;
+  RETURN m;
+END $$;
+
+-- What a missing translation reads as: NULL (default) or '' (i18n.missing = 'empty').
+CREATE OR REPLACE FUNCTION i18n_on_missing() RETURNS text
+LANGUAGE sql STABLE AS $$
+  SELECT CASE COALESCE(NULLIF(current_setting('i18n.missing', true), ''), 'null')
+           WHEN 'empty' THEN '' ELSE NULL END
 $$;
 
 -- ---------------------------------------------------------------- inspection
@@ -74,31 +99,51 @@ $$;
 
 -- ---------------------------------------------------------------- read
 
--- Resolution order: lang -> fallback -> first available translation.
--- A plain string is returned as-is whatever the language.
-CREATE OR REPLACE FUNCTION i18n_get(v text, lang text, fallback text) RETURNS text
+-- Core resolver. mode:
+--   any      lang -> default_lang -> first non-empty translation (by key)
+--   default  lang -> default_lang
+--   none     lang only
+-- Returns NULL when nothing matches. An empty-string translation counts as
+-- not set. A plain string is the default_lang text: returned for any mode
+-- except none, where it is returned only when lang = default_lang.
+CREATE OR REPLACE FUNCTION i18n_get(v text, lang text, default_lang text, mode text) RETURNS text
 LANGUAGE plpgsql IMMUTABLE SET search_path FROM CURRENT AS $$
-DECLARE j jsonb;
+DECLARE j jsonb; r text;
 BEGIN
+  IF v IS NULL THEN RETURN NULL; END IF;
   IF NOT i18n_is_json(v) THEN
-    RETURN v;
+    RETURN CASE WHEN mode <> 'none' OR lang = default_lang THEN NULLIF(v, '') END;
   END IF;
   j := v::jsonb;
-  RETURN COALESCE(
-    j ->> lang,
-    j ->> fallback,
-    (SELECT value FROM jsonb_each_text(j) ORDER BY key LIMIT 1)
-  );
+  r := NULLIF(j ->> lang, '');
+  IF r IS NOT NULL OR mode = 'none' THEN RETURN r; END IF;
+  r := NULLIF(j ->> default_lang, '');
+  IF r IS NOT NULL OR mode = 'default' THEN RETURN r; END IF;
+  RETURN (SELECT value FROM jsonb_each_text(j) WHERE value <> '' ORDER BY key LIMIT 1);
 END $$;
 
+-- lang -> fallback -> first available. IMMUTABLE, for expression indexes.
+CREATE OR REPLACE FUNCTION i18n_get(v text, lang text, fallback text) RETURNS text
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
+  SELECT i18n_get(v, lang, fallback, 'any')
+$$;
+
+-- Exactly lang, no fallback at all.
+CREATE OR REPLACE FUNCTION i18n_exact(v text, lang text, default_lang text) RETURNS text
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
+  SELECT i18n_get(v, lang, default_lang, 'none')
+$$;
+
+-- Session-driven forms: policy from i18n.fallback, missing value from i18n.missing.
 CREATE OR REPLACE FUNCTION i18n_get(v text, lang text) RETURNS text
 LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
-  SELECT i18n_get(v, lang, i18n_default_lang())
+  SELECT CASE WHEN v IS NULL THEN NULL
+              ELSE COALESCE(i18n_get(v, lang, i18n_default_lang(), i18n_fallback()), i18n_on_missing()) END
 $$;
 
 CREATE OR REPLACE FUNCTION i18n_get(v text) RETURNS text
 LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
-  SELECT i18n_get(v, i18n_lang(), i18n_default_lang())
+  SELECT i18n_get(v, i18n_lang())
 $$;
 
 -- ---------------------------------------------------------------- write
@@ -161,22 +206,46 @@ LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
               ELSE '{}'::text[] END
 $$;
 
+-- Kept free of SET search_path so the planner can inline it in index expressions.
+CREATE OR REPLACE FUNCTION i18n_get(v jsonb, lang text, default_lang text, mode text) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE
+    WHEN v IS NULL THEN NULL
+    WHEN jsonb_typeof(v) <> 'object' THEN
+      CASE WHEN mode <> 'none' OR lang = default_lang
+           THEN NULLIF(CASE WHEN jsonb_typeof(v) = 'string' THEN v #>> '{}' ELSE v::text END, '') END
+    ELSE COALESCE(
+      NULLIF(v ->> lang, ''),
+      CASE WHEN mode = 'none' THEN NULL ELSE NULLIF(v ->> default_lang, '') END,
+      CASE WHEN mode = 'any'
+           THEN (SELECT value FROM jsonb_each_text(v) WHERE value <> '' ORDER BY key LIMIT 1) END)
+  END
+$$;
+
 CREATE OR REPLACE FUNCTION i18n_get(v jsonb, lang text, fallback text) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
   SELECT CASE
     WHEN v IS NULL THEN NULL
-    WHEN jsonb_typeof(v) = 'string' THEN v #>> '{}'
-    WHEN jsonb_typeof(v) <> 'object' THEN v::text
-    ELSE COALESCE(v ->> lang, v ->> fallback,
-                  (SELECT value FROM jsonb_each_text(v) ORDER BY key LIMIT 1))
+    WHEN jsonb_typeof(v) <> 'object' THEN
+      NULLIF(CASE WHEN jsonb_typeof(v) = 'string' THEN v #>> '{}' ELSE v::text END, '')
+    ELSE COALESCE(NULLIF(v ->> lang, ''), NULLIF(v ->> fallback, ''),
+                  (SELECT value FROM jsonb_each_text(v) WHERE value <> '' ORDER BY key LIMIT 1))
   END
 $$;
 
+CREATE OR REPLACE FUNCTION i18n_exact(v jsonb, lang text, default_lang text) RETURNS text
+LANGUAGE sql IMMUTABLE SET search_path FROM CURRENT AS $$
+  SELECT i18n_get(v, lang, default_lang, 'none')
+$$;
+
 CREATE OR REPLACE FUNCTION i18n_get(v jsonb, lang text) RETURNS text
-LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$ SELECT i18n_get(v, lang, i18n_default_lang()) $$;
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
+  SELECT CASE WHEN v IS NULL THEN NULL
+              ELSE COALESCE(i18n_get(v, lang, i18n_default_lang(), i18n_fallback()), i18n_on_missing()) END
+$$;
 
 CREATE OR REPLACE FUNCTION i18n_get(v jsonb) RETURNS text
-LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$ SELECT i18n_get(v, i18n_lang(), i18n_default_lang()) $$;
+LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$ SELECT i18n_get(v, i18n_lang()) $$;
 
 CREATE OR REPLACE FUNCTION i18n_set(v jsonb, lang text, val text, promote_as text) RETURNS jsonb
 LANGUAGE plpgsql IMMUTABLE SET search_path FROM CURRENT AS $$
@@ -353,7 +422,7 @@ BEGIN
   -- RETURNING list that yields a row shaped like the view
   SELECT string_agg(
            CASE WHEN col = ANY(tcols)
-                THEN format('i18n_get(%I, %L, %L) AS %I', col, lang, dflt, col)
+                THEN format('i18n_get(%I) AS %I', col, col)
                 ELSE format('%I', col) END, ', ')
     INTO ret
   FROM unnest(allcols) AS col;

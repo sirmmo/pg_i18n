@@ -28,6 +28,44 @@ SELECT i18n_set('plain', 'it', 'Ciao', 'en')          AS promoted,   -- {"en":"p
        i18n_set('{"en":"Hello","it":"Ciao"}','it',NULL,'en') AS removed, -- {"en":"Hello"}
        i18n_set('{"it":"Ciao"}','it',NULL,'en')       AS emptied;    -- NULL
 
+-- fallback modes (immutable form) and i18n_exact
+SELECT i18n_get('{"en":"Hello","it":"Ciao"}', 'de', 'en', 'any')     AS any_d,     -- Hello
+       i18n_get('{"en":"Hello","it":"Ciao"}', 'de', 'en', 'default') AS default_d, -- Hello
+       i18n_get('{"en":"Hello","it":"Ciao"}', 'de', 'en', 'none')    AS none_d,    -- NULL
+       i18n_get('{"fr":"Salut"}', 'de', 'en', 'any')                 AS any_f,     -- Salut
+       i18n_get('{"fr":"Salut"}', 'de', 'en', 'default')             AS default_f, -- NULL
+       i18n_get('{"en":"Hello","it":""}', 'it', 'en', 'none')        AS empty_is_unset, -- NULL
+       i18n_get('{"en":"Hello","it":""}', 'it', 'en', 'any')         AS empty_falls,    -- Hello
+       i18n_get('plain', 'it', 'en', 'none')                         AS plain_none,     -- NULL
+       i18n_get('plain', 'en', 'en', 'none')                         AS plain_none_en,  -- plain
+       i18n_get('plain', 'it', 'en', 'default')                      AS plain_default,  -- plain
+       i18n_exact('{"en":"Hello"}'::jsonb, 'it', 'en')               AS exact_j,        -- NULL
+       i18n_exact('"Hello"'::jsonb, 'en', 'en')                      AS exact_bare;     -- Hello
+
+-- session policy: i18n.fallback and i18n.missing
+SET i18n.lang = 'de';
+SELECT i18n_get('{"en":"Hello","it":"Ciao"}') AS pol_any;                        -- Hello
+SET i18n.fallback = 'none';
+SELECT i18n_get('{"en":"Hello","it":"Ciao"}') AS pol_none_null,                  -- NULL
+       i18n_get('{"en":"Hello","it":"Ciao"}') IS NULL AS is_null;                -- t
+SET i18n.missing = 'empty';
+SELECT i18n_get('{"en":"Hello","it":"Ciao"}') AS pol_none_empty,                 -- ''
+       length(i18n_get('{"en":"Hello","it":"Ciao"}')) AS len,                    -- 0
+       i18n_get(NULL::text) AS null_stays_null,                                  -- NULL
+       i18n_get('{"de":"Hallo"}'::jsonb) AS present;                             -- Hallo
+SET i18n.fallback = 'default';
+SELECT i18n_get('{"fr":"Salut"}') AS pol_default_empty,                          -- ''
+       i18n_get('{"en":"Hello","fr":"Salut"}') AS pol_default_hit;               -- Hello
+SET i18n.fallback = 'bogus';
+DO $$ BEGIN
+  PERFORM i18n_get('x');
+  RAISE EXCEPTION 'no error raised';
+EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM NOT LIKE 'i18n.fallback must be%' THEN RAISE; END IF;
+  RAISE NOTICE 'invalid policy rejected';
+END $$;
+RESET i18n.fallback; RESET i18n.missing; RESET i18n.lang;
+
 -- session-driven overloads
 SET i18n.lang = 'it';
 SELECT i18n_get('{"en":"Hello","it":"Ciao"}') AS sess_it, i18n_set('Hello', 'Ciao') AS sess_set;
@@ -62,6 +100,13 @@ UPDATE products SET name = 'Nome piano' WHERE sku = 'A';        -- promotes plai
 SET i18n.lang = 'en';
 SELECT id, sku, name, description FROM products ORDER BY id;
 -- expected: A -> Plain name ; B -> Chair ; C -> Tavolo (only it exists, first available)
+
+-- the wrapped view follows the session policy, RETURNING included
+SET i18n.fallback = 'none'; SET i18n.missing = 'empty';
+SELECT id, sku, name, description FROM products ORDER BY id;
+-- expected: A -> Plain name / Plain desc ; B -> Chair / A chair ; C -> '' / '' (only it exists)
+UPDATE products SET price = 10 WHERE sku = 'C' RETURNING sku, name, length(name) AS len;   -- '' , 0
+RESET i18n.fallback; RESET i18n.missing;
 
 DELETE FROM products WHERE sku = 'C';
 
