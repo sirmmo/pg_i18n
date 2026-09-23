@@ -24,7 +24,7 @@ Puro SQL e PL/pgSQL, nessun codice compilato, nessun superuser necessario.
 Installabile come estensione o come semplice script. Testato su PostgreSQL 14,
 16 e 17; richiede la 9.5 o successiva.
 
-**Indice:** [Installazione](#installazione) · [Per iniziare](#per-iniziare) · [Riferimento delle funzioni](#riferimento-delle-funzioni) · [App basate su stringhe](#lasciare-intatta-unapplicazione-basata-su-stringhe) · [Migrare a jsonb](#migrare-a-jsonb) · [Automazione](#automazione-riempire-le-lingue-mancanti) · [Ricerca](#ricerca-con-like) · [Dettagli di comportamento](#dettagli-di-comportamento) · [Test](#eseguire-i-test)
+**Sito di documentazione:** https://sirmmo.github.io/pg_i18n/ · **Indice:** [Installazione](#installazione) · [Per iniziare](#per-iniziare) · [Riferimento delle funzioni](#riferimento-delle-funzioni) · [App basate su stringhe](#lasciare-intatta-unapplicazione-basata-su-stringhe) · [Migrare a jsonb](#migrare-a-jsonb) · [Automazione](#automazione-riempire-le-lingue-mancanti) · [Ricerca](#ricerca-con-like) · [Dettagli di comportamento](#dettagli-di-comportamento) · [Test](#eseguire-i-test)
 
 ## Struttura del repository
 

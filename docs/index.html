@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pg_i18n — translatable columns for PostgreSQL</title>
+<meta name="description" content="pg_i18n: read and write one language out of a text or jsonb column, keep string-only applications working, migrate to jsonb, and fill missing languages automatically with DeepL, Google Translate or OpenRouter.">
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1d1d1b; --muted: #5d5b55; --line: #e4e1d8;
+    --accent: #2f5d8a; --accent-soft: #e6eef6; --code-bg: #f1efe8; --card: #ffffff;
+    --ok: #2e7d4f; --warn: #a3630b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --fg: #e8e6e0; --muted: #a09d94; --line: #2c2e33;
+      --accent: #8ab4e0; --accent-soft: #1e2a38; --code-bg: #1f2126; --card: #1b1c20;
+      --ok: #7cc79b; --warn: #e0a54b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  a { color: var(--accent); }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+  code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: 0.9rem 1rem; border-radius: 8px; overflow-x: auto; line-height: 1.45; }
+  pre code { background: none; padding: 0; }
+  h1, h2, h3 { line-height: 1.2; letter-spacing: -0.01em; }
+  h2 { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: 1.6rem; }
+  h3 { margin-top: 2rem; font-size: 1.15rem; }
+  p, li { max-width: 72ch; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95em; }
+  th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .table-wrap { overflow-x: auto; }
+
+  .layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 2rem; max-width: 1180px; margin: 0 auto; padding: 0 1.25rem; }
+  nav.side { position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto; padding: 1.5rem 0; font-size: 0.93em; }
+  nav.side .brand { font-weight: 700; font-size: 1.15em; margin-bottom: 0.4rem; display: block; color: var(--fg); text-decoration: none; }
+  nav.side .sub { color: var(--muted); font-size: 0.85em; margin-bottom: 1.2rem; }
+  nav.side ul { list-style: none; padding: 0; margin: 0 0 1rem; }
+  nav.side li { margin: 0.15rem 0; }
+  nav.side a { text-decoration: none; color: var(--fg); display: block; padding: 0.15rem 0.5rem; border-radius: 4px; }
+  nav.side a:hover { background: var(--accent-soft); }
+  nav.side .group { color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75em; margin: 1rem 0 0.3rem 0.5rem; }
+  main { padding: 1.5rem 0 5rem; min-width: 0; }
+
+  .hero { padding: 2rem 0 1rem; }
+  .hero h1 { font-size: 2.4rem; margin: 0 0 0.5rem; }
+  .hero .tag { color: var(--muted); font-size: 1.15rem; max-width: 60ch; }
+  .hero .cta { margin-top: 1.2rem; display: flex; gap: 0.6rem; flex-wrap: wrap; }
+  .btn { display: inline-block; padding: 0.55rem 1rem; border-radius: 6px; text-decoration: none; font-weight: 600; border: 1px solid var(--accent); }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.ghost { color: var(--accent); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin: 1.2rem 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.1rem; }
+  .card h3 { margin: 0 0 0.4rem; font-size: 1.02rem; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.95em; }
+
+  .note { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 0.7rem 1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; }
+  .note.warn { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--bg)); }
+  .diagram { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; margin: 1rem 0; }
+  .diagram pre { background: none; margin: 0; font-size: 0.85em; }
+  .example { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .example > div > .lbl { font-size: 0.8em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
+  footer { color: var(--muted); font-size: 0.9em; margin-top: 4rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; gap: 0; }
+    nav.side { position: static; height: auto; border-bottom: 1px solid var(--line); padding: 1rem 0; }
+    nav.side ul { display: flex; flex-wrap: wrap; gap: 0.2rem 0.6rem; }
+    nav.side .group { width: 100%; }
+    .example { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 1.9rem; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="side">
+  <a class="brand" href="#top">pg_i18n</a>
+  <div class="sub">Translatable columns for PostgreSQL</div>
+  <div class="group">Start here</div>
+  <ul>
+    <li><a href="#what">What it is</a></li>
+    <li><a href="#where">Where to use it</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="#quickstart">Quick start</a></li>
+  </ul>
+  <div class="group">Using it</div>
+  <ul>
+    <li><a href="#model">The data model</a></li>
+    <li><a href="#read">Reading</a></li>
+    <li><a href="#write">Writing</a></li>
+    <li><a href="#fallback">Fallback and missing values</a></li>
+    <li><a href="#views">Keeping the app untouched</a></li>
+    <li><a href="#migrate">Migrating to jsonb</a></li>
+    <li><a href="#search">Searching and indexes</a></li>
+  </ul>
+  <div class="group">Automation</div>
+  <ul>
+    <li><a href="#auto">Filling missing languages</a></li>
+    <li><a href="#worker">The worker</a></li>
+    <li><a href="#detect">Language detection</a></li>
+    <li><a href="#coverage">Checking coverage</a></li>
+  </ul>
+  <div class="group">More</div>
+  <ul>
+    <li><a href="#deploy">Deployment notes</a></li>
+    <li><a href="#faq">FAQ</a></li>
+    <li><a href="https://github.com/sirmmo/pg_i18n">GitHub</a></li>
+    <li><a href="https://github.com/sirmmo/pg_i18n/blob/main/README.it.md">Italiano</a></li>
+  </ul>
+</nav>
+
+<main id="top">
+<section class="hero">
+  <h1>pg_i18n</h1>
+  <p class="tag">Translatable text columns for PostgreSQL. Plain SQL and PL/pgSQL, no compiled code, works as an extension or as a script you load with <code>psql</code>.</p>
+  <div class="cta">
+    <a class="btn primary" href="#quickstart">Quick start</a>
+    <a class="btn ghost" href="https://github.com/sirmmo/pg_i18n">Source on GitHub</a>
+  </div>
+</section>
+
+<h2 id="what">What it is</h2>
+<p>A column holds either a plain string or a JSON object of translations, and pg_i18n gives you the functions to work with both at once:</p>
+<pre><code>name
+-----------------------------------
+Chair
+{"en": "Chair", "it": "Sedia"}</code></pre>
+<div class="cards">
+  <div class="card"><h3>Read one language</h3><p><code>i18n_get(name)</code> returns the translation for the session language, with configurable fallback.</p></div>
+  <div class="card"><h3>Write one language</h3><p><code>i18n_set(name, 'it', 'Sedia')</code> returns the column value with Italian added, keeping the rest.</p></div>
+  <div class="card"><h3>Keep string-only apps working</h3><p>An updatable view exposes translatable columns as plain strings, so an API that knows nothing about languages needs no change.</p></div>
+  <div class="card"><h3>Migrate to jsonb</h3><p>One function promotes plain strings, changes the column type and adds a constraint.</p></div>
+  <div class="card"><h3>Fill missing languages</h3><p>Triggers queue rows that lack a language; a small worker translates them with DeepL, Google Translate or any model on OpenRouter.</p></div>
+  <div class="card"><h3>Detect the inserted language</h3><p>Optionally, text stored under the wrong language is moved to the right key and the others are filled from it.</p></div>
+</div>
+<p>Tested on PostgreSQL 14, 16 and 17. Needs 9.5 or later. MIT licensed.</p>
+
+<h2 id="where">Where to use it</h2>
+<p>pg_i18n fits when translations live <em>inside</em> the row rather than in a separate translations table, and when you cannot or do not want to rewrite the application that reads and writes those columns.</p>
+<h3>A legacy database with mixed content</h3>
+<p>Some rows hold plain strings, others hold JSON objects that someone started writing by hand. pg_i18n treats both uniformly, so you can start reading per language today and clean up later with the <a href="#migrate">migration</a>.</p>
+<h3>An API you cannot change</h3>
+<p>The API reads and writes the columns as plain strings. Put the <a href="#views">view layer</a> in front of the table: the API keeps its queries, the database stores every language, and the language comes from a session setting such as <code>SET i18n.lang = 'it'</code>, set per connection, per transaction or per database role.</p>
+<h3>Product catalogues, CMS content, labels</h3>
+<p>Names, descriptions, categories, menu entries: short to medium texts that need to exist in a handful of languages and where a machine translation is an acceptable first draft. The <a href="#auto">automation</a> keeps the configured languages filled and a <a href="#coverage">coverage view</a> shows what a human still has to check.</p>
+<h3>Multi-tenant or multi-region apps</h3>
+<p>Each connection or role sets its own language and fallback policy, so the same view serves an Italian tenant and a German one without any change in the application.</p>
+<div class="note"><strong>Where it does not fit.</strong> Long documents that need per-language versioning and workflow, or content where each language is edited independently by different teams with approval steps. There a dedicated translations table or a translation management system is the better tool. pg_i18n also never calls HTTP APIs from inside the database: the worker is a separate process.</div>
+
+<h2 id="install">Install</h2>
+<h3>As an extension</h3>
+<pre><code>git clone https://github.com/sirmmo/pg_i18n
+cd pg_i18n
+make install                 # PG_CONFIG=/path/to/pg_config make install if needed
+psql -d mydb -c 'CREATE EXTENSION pg_i18n'</code></pre>
+<p><code>make install</code> only copies a control file and one SQL script into the server's extension directory, so on a host without <code>make</code> you can copy them by hand. <code>CREATE EXTENSION</code> does not need a superuser, only <code>CREATE</code> on the database. To keep the functions in their own schema: <code>CREATE EXTENSION pg_i18n SCHEMA i18n;</code>.</p>
+<h3>As a plain script</h3>
+<pre><code>psql -d mydb -f i18n.sql -f i18n_auto.sql     # i18n_auto.sql is optional</code></pre>
+<p>Everything is created in the first schema of the current <code>search_path</code>. Re-running the files is safe.</p>
+<div class="note">Functions that call other pg_i18n functions pin the schema they were installed in (<code>SET search_path FROM CURRENT</code>). This is what makes them work under PostgreSQL 17's restricted <code>search_path</code> during index builds. Install with the intended schema on the path, or use <code>CREATE EXTENSION ... SCHEMA</code>; to move the extension, drop and recreate it.</div>
+
+<h2 id="quickstart">Quick start</h2>
+<pre><code>SET i18n.default_lang = 'en';       -- fallback language (default: en)
+SET i18n.lang = 'it';               -- language for this session
+
+SELECT i18n_get(name) FROM products;
+-- 'Chair'                       -> Chair     (plain string, returned as-is)
+-- {"en":"Chair","it":"Sedia"}   -> Sedia
+
+UPDATE products SET name = i18n_set(name, 'Sedia rossa') WHERE id = 1;
+-- 'Chair' -> {"en": "Chair", "it": "Sedia rossa"}   (plain string promoted to default_lang)</code></pre>
+
+<h2 id="model">The data model</h2>
+<p>A translatable value is one of:</p>
+<ul>
+  <li>a <strong>plain string</strong>, taken to be in the default language (<code>i18n.default_lang</code>, <code>en</code> unless set);</li>
+  <li>a <strong>JSON object</strong> whose keys are language codes and whose values are strings. Any text column that happens to contain other JSON, say <code>{"count": 3}</code>, is treated as a plain string;</li>
+  <li><code>NULL</code>.</li>
+</ul>
+<p>Language codes are opaque keys. Use <code>en</code>, <code>en-GB</code>, <code>pt-BR</code> as you like, but nothing resolves between <code>en</code> and <code>en-GB</code> on read. An empty-string translation counts as not set everywhere: reads fall through it and the automation fills it.</p>
+<p>Every function exists for <code>text</code> and for <code>jsonb</code> columns. PostgreSQL picks the right one from the column type, so the same queries work before and after the migration.</p>
+
+<h2 id="read">Reading</h2>
+<div class="table-wrap"><table>
+<tr><th>Function</th><th>Volatility</th><th>Description</th></tr>
+<tr><td><code>i18n_get(v)</code></td><td>STABLE</td><td>Translation for <code>i18n.lang</code>, following the session fallback policy.</td></tr>
+<tr><td><code>i18n_get(v, lang)</code></td><td>STABLE</td><td>Same for an explicit language.</td></tr>
+<tr><td><code>i18n_get(v, lang, fallback)</code></td><td>IMMUTABLE</td><td><code>lang</code>, then <code>fallback</code>, then the first non-empty language by key. Usable in indexes.</td></tr>
+<tr><td><code>i18n_get(v, lang, default, mode)</code></td><td>IMMUTABLE</td><td>Core resolver; <code>mode</code> is <code>any</code>, <code>default</code> or <code>none</code>.</td></tr>
+<tr><td><code>i18n_exact(v, lang, default)</code></td><td>IMMUTABLE</td><td>Exactly <code>lang</code> or NULL.</td></tr>
+<tr><td><code>i18n_langs(v)</code></td><td>IMMUTABLE</td><td>Languages present as <code>text[]</code>.</td></tr>
+<tr><td><code>i18n_values(v)</code>, <code>i18n_all(v)</code></td><td>IMMUTABLE</td><td>All translations as an array, or joined by newline for cross-language <code>LIKE</code>.</td></tr>
+</table></div>
+
+<h2 id="write">Writing</h2>
+<p><code>i18n_set</code> returns the new value to store. It never writes anything itself, so it composes with any <code>UPDATE</code> or <code>INSERT</code>.</p>
+<pre><code>SELECT i18n_set('Chair', 'it', 'Sedia', 'en');                     -- {"en": "Chair", "it": "Sedia"}
+SELECT i18n_set('{"en":"Chair"}', 'en', 'Armchair', 'en');         -- {"en": "Armchair"}
+SELECT i18n_set('{"en":"Chair","it":"Sedia"}', 'it', NULL, 'en');  -- {"en": "Chair"}   (NULL removes)
+SELECT i18n_set(name, 'Sedia');                                    -- session language, session default</code></pre>
+<p>A plain string is promoted to <code>{default_lang: value}</code> before the new language is added. Removing the last language yields NULL rather than <code>{}</code>.</p>
+
+<h2 id="fallback">Fallback and missing values</h2>
+<p>By default a language that is not set falls back as far as needed, so the application always gets some text: requested language, then default language, then the first non-empty one. Two session settings change that for the session-driven forms and for the wrapped views:</p>
+<pre><code>SET i18n.fallback = 'none';     -- any (default) | default | none
+SET i18n.missing  = 'empty';    -- null (default) | empty
+
+SELECT i18n_get('{"en":"Chair","it":"Sedia"}', 'de');
+-- fallback any:      Chair
+-- fallback default:  Chair
+-- fallback none:     NULL, or '' with i18n.missing = 'empty'</code></pre>
+<p>A NULL column value stays NULL whatever the settings. For a fixed choice inside one query use the immutable forms, <code>i18n_exact(v, 'de', 'en')</code> or <code>i18n_get(v, 'de', 'en', 'default')</code>.</p>
+<h3>All session settings</h3>
+<div class="table-wrap"><table>
+<tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>i18n.lang</code></td><td>value of <code>i18n.default_lang</code></td><td>language for the one-argument functions and the views</td></tr>
+<tr><td><code>i18n.default_lang</code></td><td><code>en</code></td><td>fallback on read, promotion language on write</td></tr>
+<tr><td><code>i18n.fallback</code></td><td><code>any</code></td><td>how far reads fall back: <code>any</code>, <code>default</code>, <code>none</code></td></tr>
+<tr><td><code>i18n.missing</code></td><td><code>null</code></td><td>what a missing translation reads as: <code>null</code> or <code>empty</code></td></tr>
+</table></div>
+<p>These are ordinary custom settings: <code>SET</code> per connection, <code>SET LOCAL</code> per transaction (the right choice behind a transaction-mode pooler such as PgBouncer), or permanently with <code>ALTER ROLE api_user SET i18n.lang = 'it'</code>.</p>
+
+<h2 id="views">Keeping a string-based application untouched</h2>
+<p>If the application already reads and writes the columns as plain strings, hide the JSON behind a view:</p>
+<pre><code>ALTER TABLE products RENAME TO products_i18n;
+SELECT i18n_wrap_table('products_i18n', '{name,description}', 'products');</code></pre>
+<div class="diagram"><pre>
+ application (strings only)          view "products"                 table "products_i18n"
+ ─────────────────────────           ────────────────────            ─────────────────────────
+ SELECT name FROM products    ──►    i18n_get(name)           ◄──    {"en":"Chair","it":"Sedia"}
+ UPDATE products SET name=…   ──►    INSTEAD OF trigger       ──►    i18n_set(name, lang, …)
+                                     language = i18n.lang
+</pre></div>
+<p>The application keeps using <code>products</code> and only needs <code>i18n.lang</code> set. What it sees:</p>
+<ul>
+  <li><strong>SELECT</strong> returns the translation for the session language, following the fallback policy.</li>
+  <li><strong>INSERT</strong> stores <code>{"&lt;lang&gt;": value}</code>; columns left out keep their defaults.</li>
+  <li><strong>UPDATE</strong> changes only the current language inside the JSON. A legacy plain string is promoted on the first write. Columns whose visible value did not change are not touched.</li>
+  <li><strong>DELETE</strong> and <code>RETURNING</code> work as expected.</li>
+</ul>
+<p>The table needs a primary key. To remove the layer, drop the view and rename the table back.</p>
+
+<h2 id="migrate">Migrating to jsonb</h2>
+<p>Once every writer goes through the functions or the view, turn the text columns into real <code>jsonb</code> with a constraint, and get containment queries and GIN indexes for free:</p>
+<pre><code>BEGIN;
+SELECT * FROM i18n_migration_report('products_i18n', 'name');
+--  col_type | total | nulls | plain | translated | other_json
+--  text     | 12040 |    15 |  9871 |       2154 |          0
+
+DROP VIEW IF EXISTS products;               -- ALTER COLUMN TYPE refuses a dependent view
+SELECT i18n_migrate_table('products_i18n', '{name,description}', 'en');
+SELECT i18n_wrap_table('products_i18n', '{name,description}', 'products');
+COMMIT;</code></pre>
+<p>For each column the migration promotes plain strings to <code>{"en": value}</code>, alters the type to <code>jsonb</code>, and adds a <code>CHECK</code> that only accepts a translation object. It takes an <code>ACCESS EXCLUSIVE</code> lock for the rewrite, and drops a text default that would no longer be valid. Inspect <code>other_json</code> first: those values start with <code>{</code> but are not translation objects and would be promoted wholesale.</p>
+
+<h2 id="search">Searching and indexes</h2>
+<pre><code>-- one language, with fallback
+SELECT * FROM products_i18n WHERE i18n_get(name, 'it', 'en') ILIKE '%sedia%';
+-- any language
+SELECT * FROM products_i18n WHERE i18n_all(name) ILIKE '%chair%';
+
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX ON products_i18n USING gin (i18n_get(name, 'it', 'en') gin_trgm_ops);
+CREATE INDEX ON products_i18n USING gin (i18n_all(name) gin_trgm_ops);
+
+-- jsonb only
+CREATE INDEX ON products_i18n USING gin (name);
+SELECT * FROM products_i18n WHERE name @> '{"it": "Sedia"}';
+SELECT * FROM products_i18n WHERE NOT name ? 'de';          -- rows missing German</code></pre>
+<p>Do not <code>LIKE</code> the raw column: on JSON rows it also matches keys, quotes and <code>\uXXXX</code> escapes. Filters written against the wrapped view use the session language and cannot use these indexes; query the base table with the explicit form when speed matters.</p>
+
+<h2 id="auto">Filling missing languages automatically</h2>
+<p>PostgreSQL cannot call HTTP APIs portably, so the work is split. The database detects rows missing a configured language and queues them; a worker outside the database calls the provider and writes back. Everything the worker does goes through queue functions, so it needs no knowledge of your tables.</p>
+<div class="diagram"><pre>
+ INSERT/UPDATE ──► AFTER trigger ──► i18n_queue (pending) ──► NOTIFY
+                                          │
+      worker: i18n_queue_claim() ◄────────┘
+              provider.translate()         DeepL · Google · OpenRouter · echo
+              i18n_queue_complete() ──► i18n_fill(col, translations)   only adds what is still missing
+</pre></div>
+<pre><code>SELECT i18n_auto_enable('products_i18n', 'name', '{en,it,de}',
+                        NULL,           -- source language: NULL = default lang, else first available
+                        'openrouter',   -- provider: NULL = worker default
+                        'furniture product names, keep brand names untranslated');
+
+SELECT i18n_backfill('products_i18n', 'name');    -- queue every existing row that misses a language
+SELECT i18n_auto_disable('products_i18n', 'name');</code></pre>
+<p>Rules that keep it safe and cheap:</p>
+<ul>
+  <li>Only missing or empty languages are requested, and only what is still missing at write-back time is written. A human translation entered while a job is in flight wins.</li>
+  <li>A changed source text does not retranslate languages that already exist. Clear a language with <code>i18n_set(v, 'it', NULL)</code> to have it redone.</li>
+  <li>One open job per row and column; repeated writes update it. Claims use <code>FOR UPDATE SKIP LOCKED</code>, so several workers can run.</li>
+  <li>Jobs go <code>pending → processing → done</code> or <code>error</code> after the configured attempts; stale jobs from a dead worker are requeued.</li>
+</ul>
+
+<h2 id="worker">The worker</h2>
+<p>A single Python file depending on psycopg 3 and the standard library, also available as a container.</p>
+<pre><code>cd worker && pip install -r requirements.txt
+export PG_I18N_DSN=postgresql://user:pw@host/db
+export PG_I18N_PROVIDER=deepl DEEPL_API_KEY=...             # or
+export PG_I18N_PROVIDER=google GOOGLE_TRANSLATE_API_KEY=... # or
+export PG_I18N_PROVIDER=openrouter OPENROUTER_API_KEY=... OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
+
+./pg_i18n_worker.py            # runs forever: LISTEN/NOTIFY plus a periodic poll
+./pg_i18n_worker.py --once     # drain the queue and exit, for cron
+
+docker build -t pg_i18n-worker worker/ && docker run --env-file .env pg_i18n-worker</code></pre>
+<div class="table-wrap"><table>
+<tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>PG_I18N_DSN</code> / <code>DATABASE_URL</code></td><td></td><td>connection string</td></tr>
+<tr><td><code>PG_I18N_SCHEMA</code></td><td></td><td>schema pg_i18n is installed in, if not on the search_path</td></tr>
+<tr><td><code>PG_I18N_PROVIDER</code></td><td><code>echo</code></td><td>provider for jobs whose column config has none</td></tr>
+<tr><td><code>PG_I18N_BATCH</code>, <code>PG_I18N_POLL</code></td><td><code>10</code>, <code>30</code></td><td>jobs per round, seconds between polls when idle</td></tr>
+<tr><td><code>PG_I18N_MAX_ATTEMPTS</code>, <code>PG_I18N_STALE_MINUTES</code></td><td><code>3</code>, <code>10</code></td><td>failures before <code>error</code>; requeue age for stuck jobs</td></tr>
+<tr><td><code>PG_I18N_DETECT</code></td><td><code>provider</code></td><td>language detection source: <code>provider</code> or <code>local</code></td></tr>
+<tr><td><code>DEEPL_API_KEY</code>, <code>DEEPL_TARGET_MAP</code>, <code>DEEPL_FORMALITY</code></td><td></td><td>keys ending in <code>:fx</code> use the free endpoint; regional targets like <code>en=EN-GB</code></td></tr>
+<tr><td><code>GOOGLE_TRANSLATE_API_KEY</code>, <code>GOOGLE_TRANSLATE_FORMAT</code></td><td></td><td>Cloud Translation Basic (v2); <code>text</code> or <code>html</code></td></tr>
+<tr><td><code>OPENROUTER_API_KEY</code>, <code>OPENROUTER_MODEL</code></td><td></td><td>any OpenRouter model id; the column hint goes into the prompt</td></tr>
+</table></div>
+<p>To add another service, write a class with a <code>translate(text, source_lang, target_langs, hint, detect)</code> method returning <code>({lang: text}, detected_lang)</code> and register it in <code>PROVIDERS</code>.</p>
+
+<h2 id="detect">Language detection</h2>
+<p>An application that knows nothing about languages inserts plain strings, taken to be in the default language. Someone using the API in an Italian session may paste an English text, which lands under <code>it</code>. Detection, off by default, fixes both at translation time:</p>
+<pre><code>SELECT i18n_auto_enable('notes', 'body', '{en,it,de}', NULL, 'deepl', NULL, true);</code></pre>
+<p>The worker asks the provider (or the local <code>langdetect</code> package) what language the source text is in. If it differs from the language the text was stored under, the text is moved to the detected key, the wrong key is cleared, and every configured language, including the wrong one, is filled from the detected text. A language outside the configured set stays under its own key:</p>
+<div class="example">
+  <div><div class="lbl">inserted, {en,it} configured</div><pre><code>'Bonjour'</code></pre></div>
+  <div><div class="lbl">after the worker</div><pre><code>{"en": "Hello", "fr": "Bonjour", "it": "Ciao"}</code></pre></div>
+</div>
+<p>The move happens only while the original key still holds exactly the inserted text and the detected key is empty, so a human edit in the meantime wins. Provider codes are mapped onto yours (<code>EN</code> matches <code>en</code>, <code>zh-CN</code> matches <code>zh</code>) and regional variants of the same language never trigger a move.</p>
+
+<h2 id="coverage">Checking coverage</h2>
+<pre><code>SELECT * FROM i18n_coverage;
+--      tbl       | col  | enabled | lang | total | missing | done_pct
+--  products_i18n | name | t       | de   |     5 |       5 |      0.0
+--  products_i18n | name | t       | en   |     5 |       2 |     60.0
+--  products_i18n | name | t       | it   |     5 |       0 |    100.0
+
+SELECT * FROM i18n_missing_translations WHERE NOT queued;
+--      tbl       | col  | enabled |    pk     | present | missing | queued
+--  products_i18n | name | t       | {"id": 6} | {it}    | {de,en} | f
+
+SELECT status, count(*) FROM i18n_queue GROUP BY 1;
+UPDATE i18n_queue SET status = 'pending', attempts = 0 WHERE status = 'error';   -- retry</code></pre>
+<p>Both views cover every column configured for automation. For an unconfigured column, or to limit the scan to one table, call <code>i18n_missing_rows(table, col, langs)</code> and <code>i18n_coverage_of(table, col, langs)</code> directly.</p>
+
+<h2 id="deploy">Deployment notes</h2>
+<ul>
+  <li><strong>Connection poolers.</strong> With PgBouncer in transaction mode, set the language with <code>SET LOCAL</code> inside each transaction, or fix it per role with <code>ALTER ROLE</code>.</li>
+  <li><strong>Permissions.</strong> The worker needs to execute the <code>i18n_queue_*</code> functions and update the target tables. Nothing else.</li>
+  <li><strong>Backups.</strong> Installed as an extension, the <code>i18n_auto</code> and <code>i18n_queue</code> tables are included by <code>pg_dump</code>.</li>
+  <li><strong>Upgrades.</strong> Re-running the SQL files, or <code>ALTER EXTENSION pg_i18n UPDATE</code> once versions are published, is safe: everything is <code>CREATE OR REPLACE</code> and new columns are added conditionally.</li>
+  <li><strong>Costs.</strong> DeepL and Google make one request per target language and row; OpenRouter one per row. Only missing languages are ever requested.</li>
+</ul>
+
+<h2 id="faq">FAQ</h2>
+<h3>Does the application have to change at all?</h3>
+<p>No, if you use the view layer. It has to set <code>i18n.lang</code>, which can be done per role on the database side without touching application code.</p>
+<h3>What happens to a plain string when someone writes Italian to it?</h3>
+<p>It becomes <code>{"en": "old text", "it": "new text"}</code>: the plain string is promoted to the default language first.</p>
+<h3>Can I use it without the automation?</h3>
+<p>Yes. <code>i18n.sql</code> alone gives you reading, writing, the view layer, the migration and the search helpers. The automation is a second file, and the worker is optional on top of that.</p>
+<h3>Will the automation overwrite human translations?</h3>
+<p>No. It only writes languages that are still missing at write-back time. The single exception is language detection, which moves a text to its detected key while that text is still exactly what was inserted.</p>
+<h3>Can I run it on a managed PostgreSQL where I cannot install extensions?</h3>
+<p>Yes. Load the SQL files with <code>psql</code>; they need no superuser and no server-side files.</p>
+
+<footer>
+  pg_i18n · MIT · <a href="https://github.com/sirmmo/pg_i18n">github.com/sirmmo/pg_i18n</a> · <a href="https://github.com/sirmmo/pg_i18n/blob/main/README.it.md">Documentazione in italiano</a>
+</footer>
+</main>
+</div>
+</body>
+</html>

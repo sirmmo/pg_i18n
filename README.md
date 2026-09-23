@@ -22,7 +22,7 @@ DeepL, Google Translate or any model on OpenRouter.
 Pure SQL and PL/pgSQL, no compiled code, no superuser needed. Installable as an
 extension or as a plain script. Tested on PostgreSQL 14, 16 and 17; needs 9.5+.
 
-**Contents:** [Install](#install) · [Quick start](#quick-start) · [Function reference](#function-reference) · [String-based apps](#keeping-a-string-based-application-untouched) · [Migrating to jsonb](#migrating-to-jsonb) · [Automation](#automation-filling-missing-languages) · [Searching](#searching-with-like) · [Behaviour details](#behaviour-details) · [Tests](#running-the-tests)
+**Docs site:** https://sirmmo.github.io/pg_i18n/ · **Contents:** [Install](#install) · [Quick start](#quick-start) · [Function reference](#function-reference) · [String-based apps](#keeping-a-string-based-application-untouched) · [Migrating to jsonb](#migrating-to-jsonb) · [Automation](#automation-filling-missing-languages) · [Searching](#searching-with-like) · [Behaviour details](#behaviour-details) · [Tests](#running-the-tests)
 
 ## Repository layout
 
