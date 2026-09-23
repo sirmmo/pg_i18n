@@ -185,11 +185,12 @@ SELECT i18n_set('{"en":"Chair","it":"Sedia"}', 'it', NULL, 'en'); -- {"en": "Cha
 |---|---|
 | `i18n_missing(v, langs [, default_lang])` | `text[]` delle lingue di `langs` assenti o vuote in `v`. IMMUTABLE con il terzo argomento. |
 | `i18n_fill(v, traduzioni)` | Restituisce `v` con le lingue dell'oggetto `{"lang": "testo"}` aggiunte, solo dove ancora mancanti. STABLE. |
-| `i18n_auto_enable(tabella, col, langs [, source_lang, provider, hint])` | Configura `col` perché resti compilata per `langs` e collega il trigger. |
+| `i18n_auto_enable(tabella, col, langs [, source_lang, provider, hint, detect])` | Configura `col` perché resti compilata per `langs` e collega il trigger. `detect` (predefinito false) abilita il [riconoscimento della lingua](#riconoscere-la-lingua-del-testo-inserito). |
+| `i18n_relocate(v, from_lang, to_lang, txt)` | Sposta `txt` da una chiave di lingua a un'altra, solo se `from_lang` contiene ancora esattamente `txt` e `to_lang` è vuota. STABLE. |
 | `i18n_auto_disable(tabella, col)` | Rimuove il trigger e disabilita la configurazione. |
 | `i18n_backfill(tabella, col)` | Mette in coda ogni riga esistente a cui manca una lingua configurata. Restituisce il conteggio. |
 | `i18n_queue_claim(n, worker)` | Lato worker: prende fino a `n` job in attesa (`SKIP LOCKED`) e li restituisce. |
-| `i18n_queue_complete(id, traduzioni)` | Lato worker: applica le traduzioni tramite `i18n_fill` e marca il job come completato. |
+| `i18n_queue_complete(id, traduzioni [, detected_lang])` | Lato worker: applica le traduzioni tramite `i18n_fill` e marca il job come completato. Con una `detected_lang` diversa dalla lingua sorgente del job, il testo viene prima spostato lì con `i18n_relocate`. |
 | `i18n_queue_fail(id, errore [, max_attempts])` | Lato worker: torna in attesa, oppure `error` dopo `max_attempts`. |
 | `i18n_queue_requeue_stale([intervallo])` | Riporta in attesa i job bloccati in `processing` da più di `intervallo`. |
 | `i18n_present(v, default_lang)` | `text[]` delle lingue con testo non vuoto. Una stringa semplice conta come `default_lang`. IMMUTABLE. |
@@ -343,6 +344,49 @@ quali tra `langs` sono assenti o vuote, `i18n_fill(v, '{"it": "..."}')`
 aggiunge solo le lingue ancora mancanti, `i18n_exact(v, lang, default)` legge
 una lingua senza ripiego.
 
+### Riconoscere la lingua del testo inserito
+
+Un'applicazione che non sa nulla di lingue inserisce stringhe semplici, e
+queste vengono considerate nella lingua predefinita. Chi usa l'API in una
+sessione italiana può incollare un testo inglese, che finisce sotto `it`. Il
+riconoscimento, disattivato per default, corregge entrambi i casi al momento
+della traduzione. Si abilita per colonna con l'ultimo argomento di
+`i18n_auto_enable`:
+
+```sql
+SELECT i18n_auto_enable('notes', 'body', '{en,it,de}', NULL, 'deepl', NULL, true);
+```
+
+Per ogni job di una colonna così configurata il worker chiede al provider (o
+a un rilevatore locale) in che lingua è il testo sorgente. Se coincide con la
+lingua sotto cui il testo era salvato, non cambia nulla. Altrimenti:
+
+1. il testo viene spostato sotto la chiave della lingua rilevata e la chiave
+   di partenza viene svuotata, purché contenga ancora esattamente quel testo
+   e la chiave di destinazione sia vuota (una modifica umana nel frattempo
+   ha la precedenza);
+2. ogni altra lingua configurata, compresa quella sotto cui era stato salvato
+   per errore, viene compilata traducendo dalla lingua rilevata.
+
+Un testo in una lingua fuori dall'insieme configurato resta sotto la propria
+chiave e tutte le lingue configurate ricevono la traduzione: `Bonjour`
+inserito con `{en,it}` configurate diventa
+`{"en": "Hello", "fr": "Bonjour", "it": "Ciao"}`. Il job registra la lingua
+rilevata in `i18n_queue.detected_lang`.
+
+Fonte del riconoscimento (`PG_I18N_DETECT` sul worker):
+
+| Valore | Come |
+|---|---|
+| `provider` (predefinito) | DeepL e Google rilevano durante la traduzione (la lingua sorgente viene omessa dalla prima richiesta); a OpenRouter viene chiesto di restituire il codice rilevato insieme alle traduzioni. |
+| `local` | Il pacchetto Python `langdetect`, senza chiamate API aggiuntive (`pip install langdetect`). Utilizzabile anche con `echo` per le prove. |
+
+I codici dei provider vengono mappati sui vostri: `EN` da DeepL corrisponde a
+`en`, `zh-CN` da Google corrisponde a uno `zh` configurato, e un codice
+regionale come `en-GB` è considerato la stessa lingua di `en`, quindi non
+provoca mai uno spostamento. I codici fuori dall'insieme configurato vengono
+salvati in minuscolo così come restituiti.
+
 ### Controllare cosa manca
 
 Due viste rispondono a "cosa non è ancora tradotto" per ogni colonna
@@ -400,6 +444,7 @@ con le stesse variabili d'ambiente. Tutte le impostazioni:
 | `PG_I18N_POLL` | `30` | secondi tra un poll e l'altro quando la coda è vuota |
 | `PG_I18N_MAX_ATTEMPTS` | `3` | fallimenti prima che un job sia marcato `error` |
 | `PG_I18N_STALE_MINUTES` | `10` | i job rimasti `processing` per questo tempo vengono rimessi in coda |
+| `PG_I18N_DETECT` | `provider` | fonte del riconoscimento lingua per le colonne con `detect`: `provider` o `local` |
 | `DEEPL_API_KEY` | | le chiavi che finiscono in `:fx` usano l'endpoint gratuito |
 | `DEEPL_TARGET_MAP` | `en=EN-US,pt=PT-PT,zh=ZH-HANS` | varianti regionali DeepL, es. `en=EN-GB,pt=PT-BR` |
 | `DEEPL_FORMALITY` | | `more`, `less`, `prefer_more`, `prefer_less` |
@@ -496,6 +541,10 @@ forma esplicita.
   scrittura, e un testo sorgente modificato non ritraduce le lingue già
   esistenti. Svuotate una lingua (`i18n_set(v, 'it', NULL)`) per farla
   rifare.
+- Con `detect` abilitato su una colonna, l'unica eccezione al "solo aggiunge"
+  è lo spostamento di un testo sotto la lingua rilevata, che svuota la chiave
+  di partenza; avviene solo finché quella chiave contiene ancora esattamente
+  il testo inserito.
 - I trigger dell'automazione scattano sulla tabella base, quindi le scritture
   attraverso le viste generate e quelle dirette sono trattate allo stesso
   modo. Anche la scrittura del worker fa scattare il trigger, che non trova

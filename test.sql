@@ -258,3 +258,37 @@ SELECT * FROM i18n_coverage_of('articles', 'title', '{en,it,de}');
 
 SELECT tbl, col, enabled, pk, present, missing, queued FROM i18n_missing_translations ORDER BY tbl::text, col, pk;
 SELECT tbl, col, enabled, lang, total, missing, done_pct FROM i18n_coverage ORDER BY tbl::text, col, lang;
+
+-- ================================================================ language detection
+SELECT i18n_relocate('{"it":"Hello world"}', 'it', 'en', 'Hello world')      AS moved,     -- {"en": "Hello world"}
+       i18n_relocate('{"it":"Hello world"}', 'it', 'en', 'other')            AS untouched, -- unchanged (text differs)
+       i18n_relocate('{"it":"Hello","en":"Hi"}'::jsonb, 'it', 'en', 'Hello') AS kept,      -- unchanged (en has text)
+       i18n_relocate('Bonjour', 'en', 'fr', 'Bonjour')                       AS plain;     -- {"fr": "Bonjour"}
+
+CREATE TABLE notes (id serial PRIMARY KEY, txt text);
+SELECT i18n_auto_enable('notes', 'txt', '{en,it}', NULL, 'echo', NULL, true);
+SELECT i18n_wrap_table('notes', '{txt}', 'notes_v');
+SET i18n.lang = 'it';
+INSERT INTO notes_v (txt) VALUES ('Hello world');          -- English text stored under it
+RESET i18n.lang;
+SELECT source_lang, source_text, target_langs, langs, detect FROM i18n_queue WHERE tbl = 'notes'::regclass;
+-- expected: it, Hello world, {en}, {en,it}, t
+
+-- worker reports detected 'en': text moves to en, it gets the translation
+SELECT max(id) AS id FROM i18n_queue WHERE tbl = 'notes'::regclass AND status = 'pending' \gset
+SELECT i18n_queue_complete(:id, '{"it":"Ciao mondo"}', 'en');
+SELECT txt FROM notes;                                       -- {"en": "Hello world", "it": "Ciao mondo"}
+SELECT status, detected_lang FROM i18n_queue WHERE id = :id; -- done, en
+
+-- detected language outside the main ones: kept under its own key, main ones filled
+INSERT INTO notes (txt) VALUES ('Bonjour');                  -- plain string, assumed en
+SELECT max(id) AS id FROM i18n_queue WHERE tbl = 'notes'::regclass AND status = 'pending' \gset
+SELECT i18n_queue_complete(:id, '{"en":"Hello","it":"Ciao"}', 'fr');
+SELECT txt FROM notes WHERE id = 2;                          -- {"en": "Hello", "fr": "Bonjour", "it": "Ciao"}
+
+-- detection agreeing with the assumed language is a no-op
+INSERT INTO notes (txt) VALUES ('Good morning');
+SELECT max(id) AS id FROM i18n_queue WHERE tbl = 'notes'::regclass AND status = 'pending' \gset
+SELECT i18n_queue_complete(:id, '{"it":"Buongiorno"}', 'en');
+SELECT txt FROM notes WHERE id = 3;                          -- {"en": "Good morning", "it": "Buongiorno"}
+SELECT detected_lang FROM i18n_queue WHERE id = :id;         -- NULL

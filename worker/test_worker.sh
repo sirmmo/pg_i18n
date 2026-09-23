@@ -21,10 +21,15 @@ SELECT i18n_auto_enable('articles', 'title', '{en,it,de}');
 SELECT i18n_auto_enable('articles', 'body',  '{en,it,de}', NULL, 'echo', 'article bodies');
 SELECT i18n_backfill('articles', 'title'), i18n_backfill('articles', 'body');
 INSERT INTO articles (title) VALUES ('Inserted later');
+-- detection: echo reports 'xx:' prefixes as the language
+CREATE TABLE notes (id serial PRIMARY KEY, txt text);
+SELECT i18n_auto_enable('notes', 'txt', '{en,it}', NULL, 'echo', NULL, true);
+INSERT INTO notes (txt) VALUES ('fr:Bonjour'), ('en:Hello'), ('{"it":"de:Hallo"}');
 SQL
 
 docker run --rm --network "$NET" -e PG_I18N_DSN="postgresql://postgres@$PG/postgres" \
   -e PG_I18N_PROVIDER=echo "$IMG" --once
 
 docker exec "$PG" psql -U postgres -At -c "SELECT id, title, body FROM articles ORDER BY id" \
+                                       -c "SELECT id, txt FROM notes ORDER BY id" \
                                        -c "SELECT status, count(*) FROM i18n_queue GROUP BY 1 ORDER BY 1"

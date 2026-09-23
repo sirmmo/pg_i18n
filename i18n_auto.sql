@@ -11,11 +11,12 @@
 -- Public API
 --   i18n_missing(v, langs [, default_lang])   -> text[] : languages in langs absent or empty in v
 --   i18n_fill(v, translations jsonb)          -> same type as v : add only languages still missing
---   i18n_auto_enable(tbl, col, langs [, source_lang, provider, hint])
+--   i18n_auto_enable(tbl, col, langs [, source_lang, provider, hint, detect])
+--   i18n_relocate(v, from_lang, to_lang, txt) -> same type as v : move txt from one language key to another
 --   i18n_auto_disable(tbl, col)
 --   i18n_backfill(tbl, col)                   -> bigint : enqueue every row with missing languages
 --   i18n_queue_claim(n, worker)               -> SETOF i18n_queue  (worker side)
---   i18n_queue_complete(id, translations)                          (worker side)
+--   i18n_queue_complete(id, translations [, detected_lang])        (worker side)
 --   i18n_queue_fail(id, error [, max_attempts])                    (worker side)
 --   i18n_queue_requeue_stale([interval])      -> bigint
 --   i18n_present(v, default_lang)             -> text[] : languages with non-empty text
@@ -33,9 +34,17 @@ CREATE TABLE IF NOT EXISTS i18n_auto (
   source_lang text,                    -- preferred source; NULL = i18n.default_lang, else first available
   provider    text,                    -- NULL = worker default (deepl | google | openrouter | echo)
   hint        text,                    -- free-text context handed to LLM providers
+  detect      boolean  NOT NULL DEFAULT false,  -- detect the language of inserted text (see README)
   enabled     boolean  NOT NULL DEFAULT true,
   PRIMARY KEY (tbl, col)
 );
+-- upgrade path for installs made before these columns existed
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'i18n_auto'::regclass AND attname = 'detect' AND NOT attisdropped) THEN
+    ALTER TABLE i18n_auto ADD COLUMN detect boolean NOT NULL DEFAULT false;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS i18n_queue (
   id           bigserial PRIMARY KEY,
@@ -45,8 +54,11 @@ CREATE TABLE IF NOT EXISTS i18n_queue (
   source_lang  text     NOT NULL,
   source_text  text     NOT NULL,
   target_langs text[]   NOT NULL,
+  langs        text[],                 -- all configured languages (for re-planning after detection)
   provider     text,
   hint         text,
+  detect       boolean  NOT NULL DEFAULT false,
+  detected_lang text,                  -- what the worker detected, when it differs from source_lang
   status       text     NOT NULL DEFAULT 'pending'
                CHECK (status IN ('pending', 'processing', 'done', 'error')),
   attempts     int      NOT NULL DEFAULT 0,
@@ -55,6 +67,15 @@ CREATE TABLE IF NOT EXISTS i18n_queue (
   created_at   timestamptz NOT NULL DEFAULT now(),
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'i18n_queue'::regclass AND attname = 'detect' AND NOT attisdropped) THEN
+    ALTER TABLE i18n_queue ADD COLUMN langs text[];
+    ALTER TABLE i18n_queue ADD COLUMN detect boolean NOT NULL DEFAULT false;
+    ALTER TABLE i18n_queue ADD COLUMN detected_lang text;
+  END IF;
+END $$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS i18n_queue_open_uq
   ON i18n_queue (tbl, col, pk) WHERE status IN ('pending', 'processing');
@@ -142,6 +163,32 @@ BEGIN
   RETURN out_v;
 END $$;
 
+-- Move txt from from_lang to to_lang, used when the worker detected that the
+-- inserted text was not in the language it was stored under. Only acts when
+-- from_lang still holds exactly txt and to_lang is empty; otherwise v is
+-- returned unchanged (a human edit in the meantime wins).
+CREATE OR REPLACE FUNCTION i18n_relocate(v jsonb, from_lang text, to_lang text, txt text) RETURNS jsonb
+LANGUAGE plpgsql STABLE SET search_path FROM CURRENT AS $$
+DECLARE dflt text := i18n_default_lang();
+BEGIN
+  IF from_lang = to_lang OR i18n_exact(v, from_lang, dflt) IS DISTINCT FROM txt
+     OR COALESCE(i18n_exact(v, to_lang, dflt), '') <> '' THEN
+    RETURN v;
+  END IF;
+  RETURN i18n_set(i18n_set(v, to_lang, txt, dflt), from_lang, NULL, dflt);
+END $$;
+
+CREATE OR REPLACE FUNCTION i18n_relocate(v text, from_lang text, to_lang text, txt text) RETURNS text
+LANGUAGE plpgsql STABLE SET search_path FROM CURRENT AS $$
+DECLARE dflt text := i18n_default_lang();
+BEGIN
+  IF from_lang = to_lang OR i18n_exact(v, from_lang, dflt) IS DISTINCT FROM txt
+     OR COALESCE(i18n_exact(v, to_lang, dflt), '') <> '' THEN
+    RETURN v;
+  END IF;
+  RETURN i18n_set(i18n_set(v, to_lang, txt, dflt), from_lang, NULL, dflt);
+END $$;
+
 -- ---------------------------------------------------------------- helpers
 
 CREATE OR REPLACE FUNCTION i18n_pk_columns(p_table regclass) RETURNS text[]
@@ -184,11 +231,12 @@ BEGIN
   FROM unnest(i18n_missing(p_value, cfg.langs, dflt)) l WHERE l <> src.lang;
   IF targets = '{}' THEN RETURN false; END IF;
 
-  INSERT INTO i18n_queue (tbl, col, pk, source_lang, source_text, target_langs, provider, hint)
-  VALUES (p_table, p_col, p_pk, src.lang, src.txt, targets, cfg.provider, cfg.hint)
+  INSERT INTO i18n_queue (tbl, col, pk, source_lang, source_text, target_langs, langs, provider, hint, detect)
+  VALUES (p_table, p_col, p_pk, src.lang, src.txt, targets, cfg.langs, cfg.provider, cfg.hint, cfg.detect)
   ON CONFLICT (tbl, col, pk) WHERE status IN ('pending', 'processing')
   DO UPDATE SET source_lang = EXCLUDED.source_lang, source_text = EXCLUDED.source_text,
-                target_langs = EXCLUDED.target_langs, updated_at = now()
+                target_langs = EXCLUDED.target_langs, langs = EXCLUDED.langs,
+                detect = EXCLUDED.detect, updated_at = now()
   RETURNING id INTO qid;
 
   PERFORM pg_notify('i18n_queue', qid::text);
@@ -211,7 +259,8 @@ END $$;
 CREATE OR REPLACE FUNCTION i18n_auto_enable(p_table regclass, p_col name, p_langs text[],
                                             p_source_lang text DEFAULT NULL,
                                             p_provider text DEFAULT NULL,
-                                            p_hint text DEFAULT NULL)
+                                            p_hint text DEFAULT NULL,
+                                            p_detect boolean DEFAULT false)
 RETURNS void LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 DECLARE pkcols text[] := i18n_pk_columns(p_table); tg text := 'i18n_auto_' || p_col;
 BEGIN
@@ -222,11 +271,12 @@ BEGIN
     RAISE EXCEPTION 'i18n_auto_enable: column %.% does not exist', p_table, p_col;
   END IF;
 
-  INSERT INTO i18n_auto (tbl, col, langs, source_lang, provider, hint, enabled)
-  VALUES (p_table, p_col, p_langs, p_source_lang, p_provider, p_hint, true)
+  INSERT INTO i18n_auto (tbl, col, langs, source_lang, provider, hint, detect, enabled)
+  VALUES (p_table, p_col, p_langs, p_source_lang, p_provider, p_hint, p_detect, true)
   ON CONFLICT (tbl, col) DO UPDATE
     SET langs = EXCLUDED.langs, source_lang = EXCLUDED.source_lang,
-        provider = EXCLUDED.provider, hint = EXCLUDED.hint, enabled = true;
+        provider = EXCLUDED.provider, hint = EXCLUDED.hint,
+        detect = EXCLUDED.detect, enabled = true;
 
   IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = p_table AND tgname = tg) THEN
     EXECUTE format('DROP TRIGGER %I ON %s', tg, p_table);
@@ -273,17 +323,29 @@ $$;
 
 -- Apply translations ({"it": "...", "de": "..."}) to the row, filling only
 -- what is still missing, and mark the job done.
-CREATE OR REPLACE FUNCTION i18n_queue_complete(p_id bigint, p_translations jsonb)
+-- p_detected_lang: the language the worker detected for source_text. When it
+-- differs from source_lang the text is moved to that key first (see
+-- i18n_relocate), so the translations may then fill source_lang as well.
+CREATE OR REPLACE FUNCTION i18n_queue_complete(p_id bigint, p_translations jsonb,
+                                               p_detected_lang text DEFAULT NULL)
 RETURNS void LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
-DECLARE q i18n_queue;
+DECLARE q i18n_queue; expr text;
 BEGIN
   SELECT * INTO q FROM i18n_queue WHERE id = p_id FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'i18n_queue_complete: no job %', p_id; END IF;
 
-  EXECUTE format('UPDATE %s SET %I = i18n_fill(%I, %L::jsonb) WHERE %s',
-                 q.tbl, q.col, q.col, p_translations, i18n_pk_where(q.tbl, q.pk));
+  expr := format('%I', q.col);
+  IF p_detected_lang IS NOT NULL AND p_detected_lang <> q.source_lang THEN
+    expr := format('i18n_relocate(%s, %L, %L, %L)', expr, q.source_lang, p_detected_lang, q.source_text);
+  END IF;
+  expr := format('i18n_fill(%s, %L::jsonb)', expr, p_translations);
 
-  UPDATE i18n_queue SET status = 'done', error = NULL, updated_at = now() WHERE id = p_id;
+  EXECUTE format('UPDATE %s SET %I = %s WHERE %s', q.tbl, q.col, expr, i18n_pk_where(q.tbl, q.pk));
+
+  UPDATE i18n_queue
+     SET status = 'done', error = NULL, updated_at = now(),
+         detected_lang = CASE WHEN p_detected_lang <> source_lang THEN p_detected_lang END
+   WHERE id = p_id;
 END $$;
 
 CREATE OR REPLACE FUNCTION i18n_queue_fail(p_id bigint, p_error text, p_max_attempts int DEFAULT 3)

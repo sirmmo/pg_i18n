@@ -181,11 +181,12 @@ SELECT i18n_set('{"en":"Chair","it":"Sedia"}', 'it', NULL, 'en'); -- {"en": "Cha
 |---|---|
 | `i18n_missing(v, langs [, default_lang])` | `text[]` of the languages in `langs` that are absent or empty in `v`. IMMUTABLE with the third argument. |
 | `i18n_fill(v, translations)` | Return `v` with the languages from the `{"lang": "text"}` object added, only where still missing. STABLE. |
-| `i18n_auto_enable(table, col, langs [, source_lang, provider, hint])` | Configure `col` to be kept filled for `langs` and attach the trigger. |
+| `i18n_auto_enable(table, col, langs [, source_lang, provider, hint, detect])` | Configure `col` to be kept filled for `langs` and attach the trigger. `detect` (default false) enables [language detection](#detecting-the-language-of-inserted-text). |
+| `i18n_relocate(v, from_lang, to_lang, txt)` | Move `txt` from one language key to another, only if `from_lang` still holds exactly `txt` and `to_lang` is empty. STABLE. |
 | `i18n_auto_disable(table, col)` | Drop the trigger and mark the configuration disabled. |
 | `i18n_backfill(table, col)` | Queue every existing row that misses a configured language. Returns the count. |
 | `i18n_queue_claim(n, worker)` | Worker side: take up to `n` pending jobs (`SKIP LOCKED`), returns them. |
-| `i18n_queue_complete(id, translations)` | Worker side: apply translations through `i18n_fill` and mark the job done. |
+| `i18n_queue_complete(id, translations [, detected_lang])` | Worker side: apply translations through `i18n_fill` and mark the job done. With a `detected_lang` different from the job's source language, the text is first moved there with `i18n_relocate`. |
 | `i18n_queue_fail(id, error [, max_attempts])` | Worker side: back to pending, or `error` after `max_attempts`. |
 | `i18n_queue_requeue_stale([interval])` | Return jobs stuck in `processing` for longer than `interval` to pending. |
 | `i18n_present(v, default_lang)` | `text[]` of the languages that have non-empty text. A plain string counts as `default_lang`. IMMUTABLE. |
@@ -336,6 +337,45 @@ of `langs` are absent or empty, `i18n_fill(v, '{"it": "..."}')` adds only
 the languages still missing, `i18n_exact(v, lang, default)` reads one language
 without fallback.
 
+### Detecting the language of inserted text
+
+An application that knows nothing about languages inserts plain strings, and
+those are taken to be in the default language. Someone using the API in an
+Italian session may paste an English text, which then lands under `it`.
+Detection, off by default, fixes both cases at translation time. Enable it per
+column with the last argument of `i18n_auto_enable`:
+
+```sql
+SELECT i18n_auto_enable('notes', 'body', '{en,it,de}', NULL, 'deepl', NULL, true);
+```
+
+For each job of such a column the worker asks the provider (or a local
+detector) what language the source text is in. If it matches the language
+the text was stored under, nothing changes. Otherwise:
+
+1. the text is moved to the detected language key, and the key it was stored
+   under is cleared, provided it still holds exactly that text and the
+   detected key is empty (a human edit in the meantime wins);
+2. every other configured language, including the one it was wrongly stored
+   under, is filled by translation from the detected language.
+
+A text in a language outside the configured set stays under its own key and
+all configured languages get translations: `Bonjour` inserted with
+`{en,it}` configured becomes `{"en": "Hello", "fr": "Bonjour", "it": "Ciao"}`.
+The job records what was detected in `i18n_queue.detected_lang`.
+
+Detection source (`PG_I18N_DETECT` on the worker):
+
+| Value | How |
+|---|---|
+| `provider` (default) | DeepL and Google detect while translating (the source language is omitted from the first request); OpenRouter is asked to return the detected code alongside the translations. |
+| `local` | The `langdetect` Python package, no extra API call (`pip install langdetect`). Also usable with `echo` for dry runs. |
+
+Provider codes are mapped onto your configured ones: `EN` from DeepL matches
+`en`, `zh-CN` from Google matches a configured `zh`, and a regional code such
+as `en-GB` is taken as the same language as `en`, so it never triggers a
+move. Codes outside the configured set are stored lower-cased as returned.
+
 ### Checking what is missing
 
 Two views answer "what is still untranslated" for every column configured
@@ -392,6 +432,7 @@ the same environment variables. All settings:
 | `PG_I18N_POLL` | `30` | seconds between polls when idle |
 | `PG_I18N_MAX_ATTEMPTS` | `3` | failures before a job is marked `error` |
 | `PG_I18N_STALE_MINUTES` | `10` | jobs left `processing` this long are requeued |
+| `PG_I18N_DETECT` | `provider` | language detection source for columns with `detect`: `provider` or `local` |
 | `DEEPL_API_KEY` | | keys ending in `:fx` use the free endpoint |
 | `DEEPL_TARGET_MAP` | `en=EN-US,pt=PT-PT,zh=ZH-HANS` | DeepL regional targets, e.g. `en=EN-GB,pt=PT-BR` |
 | `DEEPL_FORMALITY` | | `more`, `less`, `prefer_more`, `prefer_less` |
@@ -485,6 +526,9 @@ matters.
   empty, `i18n_fill` writes only what is still missing at write-back time, and
   a changed source text does not retranslate languages that already exist.
   Clear a language (`i18n_set(v, 'it', NULL)`) to have it redone.
+- With `detect` enabled on a column, the one exception to "only adds" is the
+  move of a text to its detected language, which clears the key it was stored
+  under; it happens only while that key still holds the exact inserted text.
 - Automation triggers fire on the base table, so writes through wrapped views
   and direct writes are treated the same. The worker's own write-back fires
   the trigger too, which finds nothing missing and stops there.
